@@ -47,6 +47,11 @@ xxx-code/
 - `agent_wait`
 - `agent_list`
 - `mcp__<server>__<tool>` 动态 MCP tools
+- `list_mcp_resources`
+- `list_mcp_resource_templates`
+- `read_mcp_resource`
+- `list_mcp_prompts`
+- `get_mcp_prompt`
 
 ## 运行前准备
 
@@ -68,6 +73,8 @@ REPL 内支持：
 - `:help`
 - `:agents`
 - `:mcp`
+- `:mcp-resources [server]`
+- `:mcp-prompts [server]`
 - `:wait <agent-id>`
 - `:wait-all [agent-id ...]`
 - `:send <agent-id> <prompt>`
@@ -219,6 +226,16 @@ REPL 里可以用 `:hooks` 查看当前配置。
 ```
 
 启动时会把这些远端工具映射成 `mcp__playwright__<tool>` 这种名字，所以它们会和内建 tools 一起出现在同一个 tool 集合里。
+
+除了远端 tools，这一版还把 MCP 的资源和 prompt 能力接进来了：
+
+- `list_mcp_resources`
+- `list_mcp_resource_templates`
+- `read_mcp_resource`
+- `list_mcp_prompts`
+- `get_mcp_prompt`
+
+也就是说，模型现在不仅能调 MCP server 的动作，还能枚举资源、读取资源内容，以及取回 prompt 模板消息。
 
 也可以显式指定配置文件：
 

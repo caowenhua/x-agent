@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,22 @@ func TestStartLoadsToolsFromDefaultConfig(t *testing.T) {
 		t.Fatalf("expected 1 bridged tool, got %+v", statuses[0])
 	}
 
+	if _, ok := registry.Get("list_mcp_resources"); !ok {
+		t.Fatal("expected MCP resource listing tool to be registered")
+	}
+	if _, ok := registry.Get("read_mcp_resource"); !ok {
+		t.Fatal("expected MCP resource read tool to be registered")
+	}
+	if _, ok := registry.Get("list_mcp_resource_templates"); !ok {
+		t.Fatal("expected MCP resource template listing tool to be registered")
+	}
+	if _, ok := registry.Get("list_mcp_prompts"); !ok {
+		t.Fatal("expected MCP prompt listing tool to be registered")
+	}
+	if _, ok := registry.Get("get_mcp_prompt"); !ok {
+		t.Fatal("expected MCP prompt fetch tool to be registered")
+	}
+
 	tool, ok := registry.Get("mcp__tester__echo_text")
 	if !ok {
 		t.Fatal("expected bridged MCP tool to be registered")
@@ -82,6 +99,60 @@ func TestStartLoadsToolsFromDefaultConfig(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "hello from MCP") {
 		t.Fatalf("expected echoed payload, got %q", result.Content)
+	}
+
+	resourceListTool, _ := registry.Get("list_mcp_resources")
+	resourceListResult, err := resourceListTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resourceListResult.Content, `"memory://note"`) {
+		t.Fatalf("expected listed resource, got %s", resourceListResult.Content)
+	}
+
+	readResourceTool, _ := registry.Get("read_mcp_resource")
+	readInput, _ := json.Marshal(map[string]any{
+		"server": "tester",
+		"uri":    "memory://note",
+	})
+	readResult, err := readResourceTool.Call(context.Background(), nil, readInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readResult.Content, `hello resource`) {
+		t.Fatalf("expected resource contents, got %s", readResult.Content)
+	}
+
+	templatesTool, _ := registry.Get("list_mcp_resource_templates")
+	templateListResult, err := templatesTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(templateListResult.Content, `"memory://{name}"`) {
+		t.Fatalf("expected listed resource template, got %s", templateListResult.Content)
+	}
+
+	promptsTool, _ := registry.Get("list_mcp_prompts")
+	promptListResult, err := promptsTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(promptListResult.Content, `"review_code"`) {
+		t.Fatalf("expected listed prompt, got %s", promptListResult.Content)
+	}
+
+	getPromptTool, _ := registry.Get("get_mcp_prompt")
+	getPromptInput, _ := json.Marshal(map[string]any{
+		"server":    "tester",
+		"name":      "review_code",
+		"arguments": map[string]string{"topic": "scheduler"},
+	})
+	getPromptResult, err := getPromptTool.Call(context.Background(), nil, getPromptInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(getPromptResult.Content, `Review scheduler carefully.`) {
+		t.Fatalf("expected prompt message, got %s", getPromptResult.Content)
 	}
 }
 
@@ -140,6 +211,66 @@ func TestMCPHelperProcess(t *testing.T) {
 		_ = ctx
 		_ = req
 		return nil, helperOutput{Echo: input.Value}, nil
+	})
+	server.AddResource(&sdkmcp.Resource{
+		Name:        "note",
+		Description: "A test resource",
+		MIMEType:    "text/plain",
+		URI:         "memory://note",
+	}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+		_ = ctx
+		return &sdkmcp.ReadResourceResult{
+			Contents: []*sdkmcp.ResourceContents{
+				{
+					URI:      req.Params.URI,
+					MIMEType: "text/plain",
+					Text:     "hello resource",
+				},
+			},
+		}, nil
+	})
+	server.AddResourceTemplate(&sdkmcp.ResourceTemplate{
+		Name:        "memory-note",
+		Description: "Template for memory notes",
+		MIMEType:    "text/plain",
+		URITemplate: "memory://{name}",
+	}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+		_ = ctx
+		u, err := url.Parse(req.Params.URI)
+		if err != nil {
+			return nil, err
+		}
+		return &sdkmcp.ReadResourceResult{
+			Contents: []*sdkmcp.ResourceContents{
+				{
+					URI:      req.Params.URI,
+					MIMEType: "text/plain",
+					Text:     "template resource: " + strings.TrimPrefix(u.Host+u.Path, "/"),
+				},
+			},
+		}, nil
+	})
+	server.AddPrompt(&sdkmcp.Prompt{
+		Name:        "review_code",
+		Description: "Ask for a focused code review",
+		Arguments: []*sdkmcp.PromptArgument{
+			{
+				Name:        "topic",
+				Description: "What to review",
+				Required:    true,
+			},
+		},
+	}, func(ctx context.Context, req *sdkmcp.GetPromptRequest) (*sdkmcp.GetPromptResult, error) {
+		_ = ctx
+		return &sdkmcp.GetPromptResult{
+			Description: "review prompt",
+			Messages: []*sdkmcp.PromptMessage{
+				{
+					Role:    "user",
+					Content: &sdkmcp.TextContent{Text: "Review " + req.Params.Arguments["topic"] + " carefully."},
+				},
+			},
+		}, nil
 	})
 
 	if err := server.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {

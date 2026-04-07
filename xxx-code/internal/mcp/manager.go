@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -40,6 +42,66 @@ type connectedServer struct {
 	session *sdkmcp.ClientSession
 }
 
+type Resource struct {
+	Server      string `json:"server"`
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	URI         string `json:"uri"`
+	MIMEType    string `json:"mime_type,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+}
+
+type ResourceTemplate struct {
+	Server      string `json:"server"`
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	URITemplate string `json:"uri_template"`
+	MIMEType    string `json:"mime_type,omitempty"`
+}
+
+type Prompt struct {
+	Server      string           `json:"server"`
+	Name        string           `json:"name"`
+	Title       string           `json:"title,omitempty"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type PromptMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type PromptDetails struct {
+	Server      string          `json:"server"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Messages    []PromptMessage `json:"messages"`
+}
+
+type ResourceContent struct {
+	URI       string `json:"uri"`
+	MIMEType  string `json:"mime_type,omitempty"`
+	Text      string `json:"text,omitempty"`
+	BlobBytes int    `json:"blob_bytes,omitempty"`
+	Preview   string `json:"preview"`
+}
+
+type ResourceDetails struct {
+	Server   string            `json:"server"`
+	URI      string            `json:"uri"`
+	Contents []ResourceContent `json:"contents"`
+}
+
 type toolBridge struct {
 	fullName    string
 	serverName  string
@@ -68,6 +130,7 @@ func Start(ctx context.Context, registry *engine.Registry, options Options) (*Ma
 	}
 
 	manager := &Manager{configPath: configPath}
+	manager.registerSupportTools(registry)
 	names := make([]string, 0, len(cfg.Servers))
 	for name := range cfg.Servers {
 		names = append(names, name)
@@ -206,6 +269,16 @@ func connectServer(ctx context.Context, name string, cfg ServerConfig, workingDi
 		Name:    "xxx-code",
 		Version: "dev",
 	}, nil)
+	rootPath := workingDir
+	if strings.TrimSpace(rootPath) == "" {
+		rootPath = commandDir
+	}
+	if fileURI, err := fileRootURI(rootPath); err == nil {
+		client.AddRoots(&sdkmcp.Root{
+			Name: "workspace",
+			URI:  fileURI,
+		})
+	}
 	session, err := client.Connect(ctx, &sdkmcp.CommandTransport{Command: command}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect to MCP server %s: %w", name, err)
@@ -230,6 +303,205 @@ func listAllTools(ctx context.Context, session *sdkmcp.ClientSession) ([]*sdkmcp
 		tools = append(tools, result.Tools...)
 		if result.NextCursor == "" {
 			return tools, nil
+		}
+		cursor = result.NextCursor
+	}
+}
+
+func (m *Manager) ListResources(ctx context.Context, serverName string) ([]Resource, error) {
+	var resources []Resource
+	servers, err := m.selectedServers(serverName)
+	if err != nil {
+		return nil, err
+	}
+	for _, server := range servers {
+		list, err := listAllResources(ctx, server.session)
+		if err != nil {
+			return nil, fmt.Errorf("list resources for %s: %w", server.name, err)
+		}
+		for _, resource := range list {
+			if resource == nil {
+				continue
+			}
+			resources = append(resources, Resource{
+				Server:      server.name,
+				Name:        resource.Name,
+				Title:       resource.Title,
+				Description: resource.Description,
+				URI:         resource.URI,
+				MIMEType:    resource.MIMEType,
+				Size:        resource.Size,
+			})
+		}
+	}
+	return resources, nil
+}
+
+func (m *Manager) ListResourceTemplates(ctx context.Context, serverName string) ([]ResourceTemplate, error) {
+	var templates []ResourceTemplate
+	servers, err := m.selectedServers(serverName)
+	if err != nil {
+		return nil, err
+	}
+	for _, server := range servers {
+		list, err := listAllResourceTemplates(ctx, server.session)
+		if err != nil {
+			return nil, fmt.Errorf("list resource templates for %s: %w", server.name, err)
+		}
+		for _, template := range list {
+			if template == nil {
+				continue
+			}
+			templates = append(templates, ResourceTemplate{
+				Server:      server.name,
+				Name:        template.Name,
+				Title:       template.Title,
+				Description: template.Description,
+				URITemplate: template.URITemplate,
+				MIMEType:    template.MIMEType,
+			})
+		}
+	}
+	return templates, nil
+}
+
+func (m *Manager) ListPrompts(ctx context.Context, serverName string) ([]Prompt, error) {
+	var prompts []Prompt
+	servers, err := m.selectedServers(serverName)
+	if err != nil {
+		return nil, err
+	}
+	for _, server := range servers {
+		list, err := listAllPrompts(ctx, server.session)
+		if err != nil {
+			return nil, fmt.Errorf("list prompts for %s: %w", server.name, err)
+		}
+		for _, prompt := range list {
+			if prompt == nil {
+				continue
+			}
+			prompts = append(prompts, Prompt{
+				Server:      server.name,
+				Name:        prompt.Name,
+				Title:       prompt.Title,
+				Description: prompt.Description,
+				Arguments:   convertPromptArguments(prompt.Arguments),
+			})
+		}
+	}
+	return prompts, nil
+}
+
+func (m *Manager) ReadResource(ctx context.Context, serverName, uri string) (ResourceDetails, error) {
+	server, err := m.serverByName(serverName)
+	if err != nil {
+		return ResourceDetails{}, err
+	}
+	result, err := server.session.ReadResource(ctx, &sdkmcp.ReadResourceParams{URI: uri})
+	if err != nil {
+		return ResourceDetails{}, fmt.Errorf("read resource from %s: %w", server.name, err)
+	}
+
+	details := ResourceDetails{
+		Server:   server.name,
+		URI:      uri,
+		Contents: make([]ResourceContent, 0, len(result.Contents)),
+	}
+	for _, content := range result.Contents {
+		if content == nil {
+			continue
+		}
+		details.Contents = append(details.Contents, ResourceContent{
+			URI:       content.URI,
+			MIMEType:  content.MIMEType,
+			Text:      content.Text,
+			BlobBytes: len(content.Blob),
+			Preview:   previewResourceContent(content),
+		})
+	}
+	return details, nil
+}
+
+func (m *Manager) GetPrompt(ctx context.Context, serverName, promptName string, arguments map[string]string) (PromptDetails, error) {
+	server, err := m.serverByName(serverName)
+	if err != nil {
+		return PromptDetails{}, err
+	}
+	result, err := server.session.GetPrompt(ctx, &sdkmcp.GetPromptParams{
+		Name:      promptName,
+		Arguments: arguments,
+	})
+	if err != nil {
+		return PromptDetails{}, fmt.Errorf("get prompt from %s: %w", server.name, err)
+	}
+
+	details := PromptDetails{
+		Server:      server.name,
+		Name:        promptName,
+		Description: result.Description,
+		Messages:    make([]PromptMessage, 0, len(result.Messages)),
+	}
+	for _, message := range result.Messages {
+		if message == nil {
+			continue
+		}
+		details.Messages = append(details.Messages, PromptMessage{
+			Role:    string(message.Role),
+			Content: renderPromptContent(message.Content),
+		})
+	}
+	return details, nil
+}
+
+func listAllResources(ctx context.Context, session *sdkmcp.ClientSession) ([]*sdkmcp.Resource, error) {
+	var (
+		cursor    string
+		resources []*sdkmcp.Resource
+	)
+	for {
+		result, err := session.ListResources(ctx, &sdkmcp.ListResourcesParams{Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		resources = append(resources, result.Resources...)
+		if result.NextCursor == "" {
+			return resources, nil
+		}
+		cursor = result.NextCursor
+	}
+}
+
+func listAllResourceTemplates(ctx context.Context, session *sdkmcp.ClientSession) ([]*sdkmcp.ResourceTemplate, error) {
+	var (
+		cursor    string
+		templates []*sdkmcp.ResourceTemplate
+	)
+	for {
+		result, err := session.ListResourceTemplates(ctx, &sdkmcp.ListResourceTemplatesParams{Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		templates = append(templates, result.ResourceTemplates...)
+		if result.NextCursor == "" {
+			return templates, nil
+		}
+		cursor = result.NextCursor
+	}
+}
+
+func listAllPrompts(ctx context.Context, session *sdkmcp.ClientSession) ([]*sdkmcp.Prompt, error) {
+	var (
+		cursor  string
+		prompts []*sdkmcp.Prompt
+	)
+	for {
+		result, err := session.ListPrompts(ctx, &sdkmcp.ListPromptsParams{Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		prompts = append(prompts, result.Prompts...)
+		if result.NextCursor == "" {
+			return prompts, nil
 		}
 		cursor = result.NextCursor
 	}
@@ -323,37 +595,12 @@ func renderCallToolResult(result *sdkmcp.CallToolResult) string {
 	parts := make([]string, 0, len(result.Content)+1)
 	sawText := false
 	for _, content := range result.Content {
-		switch value := content.(type) {
-		case *sdkmcp.TextContent:
-			if strings.TrimSpace(value.Text) == "" {
-				continue
-			}
-			sawText = true
-			parts = append(parts, value.Text)
-		case *sdkmcp.ImageContent:
-			parts = append(parts, fmt.Sprintf("[image %s, %d bytes]", firstNonEmpty(value.MIMEType, "application/octet-stream"), len(value.Data)))
-		case *sdkmcp.AudioContent:
-			parts = append(parts, fmt.Sprintf("[audio %s, %d bytes]", firstNonEmpty(value.MIMEType, "application/octet-stream"), len(value.Data)))
-		case *sdkmcp.ResourceLink:
-			label := firstNonEmpty(value.Title, value.Name, value.URI)
-			line := "[resource_link] " + label
-			if value.URI != "" && value.URI != label {
-				line += " <" + value.URI + ">"
-			}
-			if value.MIMEType != "" {
-				line += " (" + value.MIMEType + ")"
-			}
-			parts = append(parts, line)
-		case *sdkmcp.EmbeddedResource:
-			parts = append(parts, formatEmbeddedResource(value.Resource))
-		default:
-			raw, err := json.Marshal(value)
-			if err != nil {
-				parts = append(parts, fmt.Sprintf("[unsupported MCP content %T]", value))
-				continue
-			}
-			parts = append(parts, string(raw))
+		rendered, isText := renderContent(content)
+		if rendered == "" {
+			continue
 		}
+		sawText = sawText || isText
+		parts = append(parts, rendered)
 	}
 
 	if result.StructuredContent != nil && !sawText {
@@ -369,6 +616,34 @@ func renderCallToolResult(result *sdkmcp.CallToolResult) string {
 		return "MCP tool completed with no content"
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func (m *Manager) selectedServers(name string) ([]*connectedServer, error) {
+	if strings.TrimSpace(name) == "" {
+		servers := make([]*connectedServer, 0, len(m.servers))
+		servers = append(servers, m.servers...)
+		return servers, nil
+	}
+	server, err := m.serverByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return []*connectedServer{server}, nil
+}
+
+func (m *Manager) serverByName(name string) (*connectedServer, error) {
+	if m == nil {
+		return nil, errors.New("MCP is not configured")
+	}
+	for _, server := range m.servers {
+		if server.name == name {
+			return server, nil
+		}
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("MCP server name is required")
+	}
+	return nil, fmt.Errorf("unknown MCP server: %s", name)
 }
 
 func formatEmbeddedResource(resource *sdkmcp.ResourceContents) string {
@@ -389,6 +664,72 @@ func formatEmbeddedResource(resource *sdkmcp.ResourceContents) string {
 		return fmt.Sprintf("%s [%d bytes]", header, len(resource.Blob))
 	}
 	return header
+}
+
+func previewResourceContent(resource *sdkmcp.ResourceContents) string {
+	if resource == nil {
+		return "[resource]"
+	}
+	if strings.TrimSpace(resource.Text) != "" {
+		return resource.Text
+	}
+	if len(resource.Blob) > 0 {
+		return fmt.Sprintf("[blob %d bytes]", len(resource.Blob))
+	}
+	return formatEmbeddedResource(resource)
+}
+
+func renderPromptContent(content sdkmcp.Content) string {
+	rendered, _ := renderContent(content)
+	return rendered
+}
+
+func renderContent(content sdkmcp.Content) (string, bool) {
+	switch value := content.(type) {
+	case *sdkmcp.TextContent:
+		if strings.TrimSpace(value.Text) == "" {
+			return "", true
+		}
+		return value.Text, true
+	case *sdkmcp.ImageContent:
+		return fmt.Sprintf("[image %s, %d bytes]", firstNonEmpty(value.MIMEType, "application/octet-stream"), len(value.Data)), false
+	case *sdkmcp.AudioContent:
+		return fmt.Sprintf("[audio %s, %d bytes]", firstNonEmpty(value.MIMEType, "application/octet-stream"), len(value.Data)), false
+	case *sdkmcp.ResourceLink:
+		label := firstNonEmpty(value.Title, value.Name, value.URI)
+		line := "[resource_link] " + label
+		if value.URI != "" && value.URI != label {
+			line += " <" + value.URI + ">"
+		}
+		if value.MIMEType != "" {
+			line += " (" + value.MIMEType + ")"
+		}
+		return line, false
+	case *sdkmcp.EmbeddedResource:
+		return formatEmbeddedResource(value.Resource), false
+	default:
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Sprintf("[unsupported MCP content %T]", value), false
+		}
+		return string(raw), false
+	}
+}
+
+func convertPromptArguments(arguments []*sdkmcp.PromptArgument) []PromptArgument {
+	converted := make([]PromptArgument, 0, len(arguments))
+	for _, argument := range arguments {
+		if argument == nil {
+			continue
+		}
+		converted = append(converted, PromptArgument{
+			Name:        argument.Name,
+			Title:       argument.Title,
+			Description: argument.Description,
+			Required:    argument.Required,
+		})
+	}
+	return converted
 }
 
 func renderJSON(value any) (string, bool) {
@@ -435,4 +776,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func fileRootURI(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("path is empty")
+	}
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}).String(), nil
 }

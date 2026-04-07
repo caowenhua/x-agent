@@ -173,6 +173,8 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":quit                     save and exit the REPL")
 		fmt.Fprintln(a.out, ":agents                   list spawned agents")
 		fmt.Fprintln(a.out, ":mcp                      list MCP server status and loaded tools")
+		fmt.Fprintln(a.out, ":mcp-resources [server]   list MCP resources")
+		fmt.Fprintln(a.out, ":mcp-prompts [server]     list MCP prompts")
 		fmt.Fprintln(a.out, ":wait <agent-id>          wait for an agent and print its snapshot")
 		fmt.Fprintln(a.out, ":wait-all [agent-id ...]  wait for a batch of agents or every known agent")
 		fmt.Fprintln(a.out, ":send <agent-id> <prompt> continue an existing agent")
@@ -195,6 +197,40 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 			statuses = a.mcpManager.Statuses()
 		}
 		data, _ := json.MarshalIndent(statuses, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp-resources":
+		if a.mcpManager == nil {
+			fmt.Fprintln(a.errOut, "error: MCP is not configured")
+			return false, nil
+		}
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		result, err := a.mcpManager.ListResources(ctx, server)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp-prompts":
+		if a.mcpManager == nil {
+			fmt.Fprintln(a.errOut, "error: MCP is not configured")
+			return false, nil
+		}
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		result, err := a.mcpManager.ListPrompts(ctx, server)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
 	case ":wait":
