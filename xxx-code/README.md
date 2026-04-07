@@ -13,6 +13,7 @@
 - REPL 与单次执行模式
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
+- agent 并发上限与排队调度
 - transcript 持久化与 `resume`
 
 ## 目录结构
@@ -187,12 +188,32 @@ go run ./cmd/xxx-code \
 
 REPL 里可以用 `:hooks` 查看当前配置。
 
+## Agent 调度
+
+`xxx-code` 现在支持子 agent 并发上限控制。超过上限的新 agent 不会直接并发运行，而是进入 `queued` 状态，等已有 agent 释放槽位后再继续执行。
+
+默认值：
+
+```text
+max-parallel-agents = 4
+```
+
+可以调整：
+
+```bash
+go run ./cmd/xxx-code \
+  --max-parallel-agents 2
+```
+
+`agent_list` 和 `:agents` 都会显示 `queued / running / idle / failed / cancelled` 这些状态。
+
 ## 常用参数
 
 ```bash
 go run ./cmd/xxx-code \
   --model claude-sonnet-4-5 \
   --max-turns 12 \
+  --max-parallel-agents 4 \
   --tool-timeout 2m \
   --hook-timeout 30s \
   --context-budget 120000 \

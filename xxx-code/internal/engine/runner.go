@@ -42,6 +42,7 @@ type RunnerConfig struct {
 	ToolTimeout         time.Duration
 	HookTimeout         time.Duration
 	MaxAgentDepth       int
+	MaxParallelAgents   int
 	PermissionPolicy    PermissionPolicy
 	Hooks               HookHandler
 	EventHandler        func(Event)
@@ -80,6 +81,9 @@ func NewRunner(provider Provider, registry *Registry, config RunnerConfig) *Runn
 	if config.MaxAgentDepth <= 0 {
 		config.MaxAgentDepth = 3
 	}
+	if config.MaxParallelAgents <= 0 {
+		config.MaxParallelAgents = 4
+	}
 	if !config.PermissionPolicy.ReadOnly &&
 		!config.PermissionPolicy.BashEnabled &&
 		len(config.PermissionPolicy.ReadRoots) == 0 &&
@@ -98,6 +102,7 @@ func NewRunner(provider Provider, registry *Registry, config RunnerConfig) *Runn
 		config:   config,
 		agentState: &agentState{
 			agents: make(map[string]*managedAgent),
+			slots:  make(chan struct{}, config.MaxParallelAgents),
 		},
 	}
 }

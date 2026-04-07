@@ -314,3 +314,133 @@ func TestAfterTurnHookRuns(t *testing.T) {
 		t.Fatalf("expected 1 after_turn hook call, got %d", hook.count(HookAfterTurn))
 	}
 }
+
+type gatedProvider struct {
+	mu       sync.Mutex
+	started  map[string]chan struct{}
+	release  map[string]chan struct{}
+	startLog []string
+}
+
+func newGatedProvider() *gatedProvider {
+	return &gatedProvider{
+		started: make(map[string]chan struct{}),
+		release: make(map[string]chan struct{}),
+	}
+}
+
+func (p *gatedProvider) channelFor(m map[string]chan struct{}, prompt string) chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ch, ok := m[prompt]
+	if !ok {
+		ch = make(chan struct{})
+		m[prompt] = ch
+	}
+	return ch
+}
+
+func (p *gatedProvider) markStarted(prompt string) {
+	p.mu.Lock()
+	p.startLog = append(p.startLog, prompt)
+	ch, ok := p.started[prompt]
+	if !ok {
+		ch = make(chan struct{})
+		p.started[prompt] = ch
+	}
+	p.mu.Unlock()
+
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
+}
+
+func (p *gatedProvider) CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
+	prompt := latestUserText(request.Messages)
+	p.markStarted(prompt)
+
+	release := p.channelFor(p.release, prompt)
+	select {
+	case <-release:
+	case <-ctx.Done():
+		return CompletionResponse{}, ctx.Err()
+	}
+
+	return CompletionResponse{
+		Message: NewTextMessage(RoleAssistant, "reply:"+prompt),
+	}, nil
+}
+
+func TestRunnerQueuesAgentsWhenConcurrencyIsLimited(t *testing.T) {
+	provider := newGatedProvider()
+	runner := NewRunner(provider, NewRegistry(), RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		MaxParallelAgents: 1,
+	})
+
+	slowStarted := provider.channelFor(provider.started, "slow task")
+	slowRelease := provider.channelFor(provider.release, "slow task")
+	fastStarted := provider.channelFor(provider.started, "fast task")
+	fastRelease := provider.channelFor(provider.release, "fast task")
+
+	slow, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "slow",
+		Prompt:     "slow task",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slow.Status != AgentRunning {
+		t.Fatalf("expected running slow agent, got %s", slow.Status)
+	}
+
+	select {
+	case <-slowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow agent did not start")
+	}
+
+	fast, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "fast",
+		Prompt:     "fast task",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fast.Status != AgentQueued {
+		t.Fatalf("expected queued fast agent, got %s", fast.Status)
+	}
+
+	select {
+	case <-fastStarted:
+		t.Fatal("fast agent started before slot became available")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(slowRelease)
+	_, err = runner.WaitAgent(context.Background(), slow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-fastStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fast agent did not start after slot release")
+	}
+
+	close(fastRelease)
+	fastDone, err := runner.WaitAgent(context.Background(), fast.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fastDone.Status != AgentIdle {
+		t.Fatalf("expected idle fast agent, got %s", fastDone.Status)
+	}
+}

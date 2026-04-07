@@ -23,31 +23,32 @@ Guidelines:
 - Keep final user-facing answers concise and practical.`
 
 type Config struct {
-	APIKey         string
-	BaseURL        string
-	Version        string
-	Model          string
-	MaxTurns       int
-	MaxTokens      int
-	ContextBudget  int
-	CompactKeep    int
-	WorkingDir     string
-	SessionFile    string
-	ReadRoots      []string
-	WriteRoots     []string
-	ReadOnly       bool
-	BashEnabled    bool
-	HookBeforeTool string
-	HookAfterTool  string
-	HookAfterTurn  string
-	HookAgentEvent string
-	HookTimeout    time.Duration
-	Resume         bool
-	Print          bool
-	Verbose        bool
-	SystemPrompt   string
-	ToolTimeout    time.Duration
-	Prompt         string
+	APIKey            string
+	BaseURL           string
+	Version           string
+	Model             string
+	MaxTurns          int
+	MaxTokens         int
+	MaxParallelAgents int
+	ContextBudget     int
+	CompactKeep       int
+	WorkingDir        string
+	SessionFile       string
+	ReadRoots         []string
+	WriteRoots        []string
+	ReadOnly          bool
+	BashEnabled       bool
+	HookBeforeTool    string
+	HookAfterTool     string
+	HookAfterTurn     string
+	HookAgentEvent    string
+	HookTimeout       time.Duration
+	Resume            bool
+	Print             bool
+	Verbose           bool
+	SystemPrompt      string
+	ToolTimeout       time.Duration
+	Prompt            string
 }
 
 func Load() (Config, error) {
@@ -58,6 +59,7 @@ func Load() (Config, error) {
 	flag.StringVar(&cfg.Version, "anthropic-version", firstNonEmpty(os.Getenv("ANTHROPIC_VERSION"), "2023-06-01"), "Anthropic API version header")
 	flag.IntVar(&cfg.MaxTurns, "max-turns", 12, "Maximum agentic turns per user prompt")
 	flag.IntVar(&cfg.MaxTokens, "max-tokens", 16384, "Max output tokens per model request")
+	flag.IntVar(&cfg.MaxParallelAgents, "max-parallel-agents", 4, "Maximum number of sub-agents that can run concurrently")
 	flag.IntVar(&cfg.ContextBudget, "context-budget", 120000, "Approximate context token budget before automatic compaction; set 0 to disable")
 	flag.IntVar(&cfg.CompactKeep, "compact-keep", 12, "How many latest messages to keep verbatim during automatic compaction")
 	flag.BoolVar(&cfg.ReadOnly, "read-only", false, "Disable write_file and edit_file tool writes")

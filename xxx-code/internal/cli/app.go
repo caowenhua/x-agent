@@ -63,6 +63,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		ToolTimeout:         cfg.ToolTimeout,
 		HookTimeout:         cfg.HookTimeout,
 		MaxAgentDepth:       3,
+		MaxParallelAgents:   cfg.MaxParallelAgents,
 		PermissionPolicy: engine.PermissionPolicy{
 			ReadRoots:   cfg.ReadRoots,
 			WriteRoots:  cfg.WriteRoots,
@@ -268,6 +269,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintf(a.out, "main messages: %d\n", len(a.session.Snapshot()))
 		fmt.Fprintf(a.out, "approx tokens: %d\n", engine.EstimateTokens(a.session.Snapshot()))
 		fmt.Fprintf(a.out, "context budget: %d\n", a.config.ContextBudget)
+		fmt.Fprintf(a.out, "max parallel agents: %d\n", a.config.MaxParallelAgents)
 		fmt.Fprintf(a.out, "agents: %d\n", len(a.runner.ListAgents()))
 		return false, nil
 	default:
