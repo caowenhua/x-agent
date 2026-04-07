@@ -14,6 +14,7 @@ import (
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
 	"github.com/caowenhua/x-agent/xxx-code/internal/provider/anthropic"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
@@ -60,8 +61,21 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		CompactKeepMessages: cfg.CompactKeep,
 		WorkingDir:          cfg.WorkingDir,
 		ToolTimeout:         cfg.ToolTimeout,
+		HookTimeout:         cfg.HookTimeout,
 		MaxAgentDepth:       3,
-		EventHandler:        app.handleEvent,
+		PermissionPolicy: engine.PermissionPolicy{
+			ReadRoots:   cfg.ReadRoots,
+			WriteRoots:  cfg.WriteRoots,
+			ReadOnly:    cfg.ReadOnly,
+			BashEnabled: cfg.BashEnabled,
+		},
+		Hooks: hooks.NewScriptManager(hooks.Config{
+			BeforeTool: cfg.HookBeforeTool,
+			AfterTool:  cfg.HookAfterTool,
+			AfterTurn:  cfg.HookAfterTurn,
+			AgentEvent: cfg.HookAgentEvent,
+		}),
+		EventHandler: app.handleEvent,
 	})
 
 	return app
@@ -141,6 +155,8 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":cancel <agent-id>        cancel a running agent and its descendants")
 		fmt.Fprintln(a.out, ":history [n]              print the latest n main-session messages (default 10)")
 		fmt.Fprintln(a.out, ":compact                  compact the main session immediately if it exceeds budget")
+		fmt.Fprintln(a.out, ":policy                   print active permission policy")
+		fmt.Fprintln(a.out, ":hooks                    print configured hook commands")
 		fmt.Fprintln(a.out, ":save                     persist the current main session and agents")
 		fmt.Fprintln(a.out, ":session                  print session file information")
 		return false, nil
@@ -227,6 +243,19 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 			report.AfterMessages,
 		)
 		return false, a.saveSession()
+	case ":policy":
+		data, _ := json.MarshalIndent(a.runner.PermissionPolicy(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":hooks":
+		data, _ := json.MarshalIndent(map[string]any{
+			"before_tool": a.config.HookBeforeTool,
+			"after_tool":  a.config.HookAfterTool,
+			"after_turn":  a.config.HookAfterTurn,
+			"agent_event": a.config.HookAgentEvent,
+		}, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
 	case ":save":
 		if err := a.saveSession(); err != nil {
 			fmt.Fprintf(a.errOut, "error: %v\n", err)
@@ -316,5 +345,7 @@ func printEvent(verbose bool, out, errOut io.Writer, event engine.Event) {
 			}
 			fmt.Fprintf(errOut, "%ssession %s\n", agentPrefix, event.Text)
 		}
+	case engine.EventHookError:
+		fmt.Fprintf(errOut, "hook error: %s\n", event.Text)
 	}
 }

@@ -58,6 +58,9 @@ func (t *EditFileTool) Call(ctx context.Context, execCtx *engine.ExecutionContex
 	if err != nil {
 		return engine.ToolResult{}, err
 	}
+	if err := ensureWriteAllowed(execCtx, path); err != nil {
+		return engine.ToolResult{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return engine.ToolResult{}, err

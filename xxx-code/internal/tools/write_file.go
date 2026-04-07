@@ -46,6 +46,9 @@ func (t *WriteFileTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 	if err != nil {
 		return engine.ToolResult{}, err
 	}
+	if err := ensureWriteAllowed(execCtx, path); err != nil {
+		return engine.ToolResult{}, err
+	}
 	if err := ensureParentDir(path); err != nil {
 		return engine.ToolResult{}, err
 	}

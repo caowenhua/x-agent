@@ -66,3 +66,59 @@ func TestGlobTool(t *testing.T) {
 		t.Fatalf("expected match to include main.go, got %s", result.Content)
 	}
 }
+
+func TestWriteFileToolRespectsReadOnlyPolicy(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(nil, engine.NewRegistry(), engine.RunnerConfig{
+		WorkingDir: dir,
+		PermissionPolicy: engine.PermissionPolicy{
+			ReadRoots:   []string{dir},
+			WriteRoots:  []string{dir},
+			ReadOnly:    true,
+			BashEnabled: true,
+		},
+	})
+
+	input, _ := json.Marshal(map[string]any{
+		"path":    "demo.txt",
+		"content": "hello",
+	})
+
+	_, err := (&WriteFileTool{}).Call(context.Background(), &engine.ExecutionContext{
+		Runner:     runner,
+		WorkingDir: dir,
+	}, input)
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("expected read-only policy error, got %v", err)
+	}
+}
+
+func TestReadFileToolRejectsOutsideReadRoots(t *testing.T) {
+	dir := t.TempDir()
+	otherDir := t.TempDir()
+	path := filepath.Join(otherDir, "secret.txt")
+	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := engine.NewRunner(nil, engine.NewRegistry(), engine.RunnerConfig{
+		WorkingDir: dir,
+		PermissionPolicy: engine.PermissionPolicy{
+			ReadRoots:   []string{dir},
+			WriteRoots:  []string{dir},
+			BashEnabled: true,
+		},
+	})
+
+	input, _ := json.Marshal(map[string]any{
+		"path": path,
+	})
+
+	_, err := (&ReadFileTool{}).Call(context.Background(), &engine.ExecutionContext{
+		Runner:     runner,
+		WorkingDir: dir,
+	}, input)
+	if err == nil || !strings.Contains(err.Error(), "outside allowed read roots") {
+		t.Fatalf("expected read root policy error, got %v", err)
+	}
+}

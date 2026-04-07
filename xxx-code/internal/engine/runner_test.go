@@ -35,6 +35,10 @@ func (p *stubProvider) CreateMessage(ctx context.Context, request CompletionRequ
 
 type echoTool struct{}
 
+type countingTool struct {
+	calls int
+}
+
 func (t *echoTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name:        "echo_tool",
@@ -47,6 +51,15 @@ func (t *echoTool) Call(ctx context.Context, exec *ExecutionContext, input json.
 	_ = ctx
 	_ = exec
 	return ToolResult{Content: string(input)}, nil
+}
+
+func (t *countingTool) Definition() ToolDefinition {
+	return (&echoTool{}).Definition()
+}
+
+func (t *countingTool) Call(ctx context.Context, exec *ExecutionContext, input json.RawMessage) (ToolResult, error) {
+	t.calls++
+	return (&echoTool{}).Call(ctx, exec, input)
 }
 
 func TestRunnerExecutesToolLoop(t *testing.T) {
@@ -218,5 +231,86 @@ func TestRunnerCompactsLargeSession(t *testing.T) {
 	}
 	if !strings.Contains(messages[0].Text(), "[compacted summary]") {
 		t.Fatalf("expected summary marker, got %q", messages[0].Text())
+	}
+}
+
+type recordingHook struct {
+	mu     sync.Mutex
+	events []HookEvent
+	block  map[HookKind]error
+}
+
+func (h *recordingHook) HandleHook(ctx context.Context, event HookEvent) error {
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.events = append(h.events, event)
+	if h.block != nil {
+		if err, ok := h.block[event.Kind]; ok {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *recordingHook) count(kind HookKind) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	count := 0
+	for _, event := range h.events {
+		if event.Kind == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func TestBeforeToolHookCanBlockTool(t *testing.T) {
+	provider := &stubProvider{}
+	tool := &countingTool{}
+	hook := &recordingHook{
+		block: map[HookKind]error{
+			HookBeforeTool: context.Canceled,
+		},
+	}
+
+	runner := NewRunner(provider, NewRegistry(tool), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     4,
+		Hooks:        hook,
+	})
+	session := NewSession()
+
+	result, err := runner.RunTurn(context.Background(), session, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalText != "final answer" {
+		t.Fatalf("unexpected final text: %q", result.FinalText)
+	}
+	if tool.calls != 0 {
+		t.Fatalf("expected blocked tool to avoid execution, got %d calls", tool.calls)
+	}
+	if hook.count(HookBeforeTool) == 0 {
+		t.Fatal("expected before_tool hook to run")
+	}
+}
+
+func TestAfterTurnHookRuns(t *testing.T) {
+	hook := &recordingHook{}
+	runner := NewRunner(&promptProvider{}, NewRegistry(), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     4,
+		Hooks:        hook,
+	})
+
+	_, err := runner.RunTurn(context.Background(), NewSession(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hook.count(HookAfterTurn) != 1 {
+		t.Fatalf("expected 1 after_turn hook call, got %d", hook.count(HookAfterTurn))
 	}
 }

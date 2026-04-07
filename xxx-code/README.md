@@ -7,6 +7,8 @@
 - Anthropic Messages API 适配
 - 多轮 agent loop
 - 自动上下文压缩与 context budget 保护
+- 文件/命令权限策略
+- lifecycle hooks 扩展点
 - 本地工具调用
 - REPL 与单次执行模式
 - in-process multi-agent 基础设施
@@ -64,6 +66,8 @@ REPL 内支持：
 - `:cancel <agent-id>`
 - `:history [n]`
 - `:compact`
+- `:policy`
+- `:hooks`
 - `:save`
 - `:session`
 - `:quit`
@@ -123,6 +127,66 @@ go run ./cmd/xxx-code \
 
 当前的 budget 是近似 token 估算，不是 provider 返回的精确上下文计数，但已经足够拿来做稳定的长会话保护。
 
+## 权限策略
+
+`xxx-code` 现在把工具权限也收进了 runtime，而不是完全放任工具自由访问本机。
+
+默认行为：
+
+- `read_file` / `glob` / `grep` 只允许读取工作目录及显式允许的 read roots
+- `write_file` / `edit_file` 只允许写入工作目录及显式允许的 write roots
+- `bash` 可以整体关闭
+- `--read-only` 会直接禁止写文件类工具
+
+常见用法：
+
+```bash
+go run ./cmd/xxx-code \
+  --read-only \
+  --bash=false \
+  --allow-read ../shared-docs,/tmp/project-cache
+```
+
+或者：
+
+```bash
+go run ./cmd/xxx-code \
+  --allow-write ./generated,./reports
+```
+
+REPL 里可以用 `:policy` 查看当前生效策略。
+
+## Hooks
+
+可以为 runtime 接 shell hooks，把 `xxx-code` 接进你自己的审计、日志、编排或外部 agent 系统里。
+
+可用 hook：
+
+- `--hook-before-tool`
+- `--hook-after-tool`
+- `--hook-after-turn`
+- `--hook-agent-event`
+
+hook 会把 JSON payload 写到命令的 stdin，同时注入这些环境变量：
+
+- `XXX_CODE_HOOK_KIND`
+- `XXX_CODE_AGENT_ID`
+- `XXX_CODE_AGENT_NAME`
+- `XXX_CODE_TOOL_NAME`
+- `XXX_CODE_STATUS`
+
+其中 `before_tool` hook 的命令如果非零退出，会阻止这次工具调用。
+
+示例：
+
+```bash
+go run ./cmd/xxx-code \
+  --hook-before-tool 'cat > /tmp/xxx-before-tool.json' \
+  --hook-after-turn 'cat > /tmp/xxx-after-turn.json'
+```
+
+REPL 里可以用 `:hooks` 查看当前配置。
+
 ## 常用参数
 
 ```bash
@@ -130,9 +194,12 @@ go run ./cmd/xxx-code \
   --model claude-sonnet-4-5 \
   --max-turns 12 \
   --tool-timeout 2m \
+  --hook-timeout 30s \
   --context-budget 120000 \
   --compact-keep 12 \
   --cwd /path/to/project \
+  --allow-read ../shared-docs \
+  --allow-write ./generated \
   --resume \
   --session-file /path/to/project/.xxx-code/session.json \
   --print "实现一个功能"
@@ -187,7 +254,6 @@ go test ./...
 
 - 流式 UI / 增量 token 输出
 - MCP 客户端
-- hook 系统
 - 更细粒度的权限系统
 - remote agent / bridge / daemon
 - 更完整的任务调度、优先级与取消传播

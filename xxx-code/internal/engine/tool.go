@@ -29,3 +29,24 @@ type ExecutionContext struct {
 	AgentName  string
 	Depth      int
 }
+
+func (e *ExecutionContext) EnsureReadPath(path string) error {
+	if e == nil || e.Runner == nil {
+		return nil
+	}
+	return e.Runner.EnsureReadPath(path)
+}
+
+func (e *ExecutionContext) EnsureWritePath(path string) error {
+	if e == nil || e.Runner == nil {
+		return nil
+	}
+	return e.Runner.EnsureWritePath(path)
+}
+
+func (e *ExecutionContext) EnsureBash(command string) error {
+	if e == nil || e.Runner == nil {
+		return nil
+	}
+	return e.Runner.EnsureBash(command)
+}

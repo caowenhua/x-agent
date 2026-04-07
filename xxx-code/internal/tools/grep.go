@@ -63,6 +63,9 @@ func (t *GrepTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, i
 		}
 		root = path
 	}
+	if err := ensureReadAllowed(execCtx, root); err != nil {
+		return engine.ToolResult{}, err
+	}
 
 	pattern := args.Pattern
 	if args.Literal {

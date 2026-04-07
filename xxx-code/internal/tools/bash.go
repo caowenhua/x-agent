@@ -38,6 +38,9 @@ func (t *BashTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, i
 	if err := json.Unmarshal(input, &args); err != nil {
 		return engine.ToolResult{}, err
 	}
+	if err := execCtx.EnsureBash(args.Command); err != nil {
+		return engine.ToolResult{}, err
+	}
 
 	shell := os.Getenv("SHELL")
 	if shell == "" {

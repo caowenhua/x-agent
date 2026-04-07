@@ -23,22 +23,31 @@ Guidelines:
 - Keep final user-facing answers concise and practical.`
 
 type Config struct {
-	APIKey        string
-	BaseURL       string
-	Version       string
-	Model         string
-	MaxTurns      int
-	MaxTokens     int
-	ContextBudget int
-	CompactKeep   int
-	WorkingDir    string
-	SessionFile   string
-	Resume        bool
-	Print         bool
-	Verbose       bool
-	SystemPrompt  string
-	ToolTimeout   time.Duration
-	Prompt        string
+	APIKey         string
+	BaseURL        string
+	Version        string
+	Model          string
+	MaxTurns       int
+	MaxTokens      int
+	ContextBudget  int
+	CompactKeep    int
+	WorkingDir     string
+	SessionFile    string
+	ReadRoots      []string
+	WriteRoots     []string
+	ReadOnly       bool
+	BashEnabled    bool
+	HookBeforeTool string
+	HookAfterTool  string
+	HookAfterTurn  string
+	HookAgentEvent string
+	HookTimeout    time.Duration
+	Resume         bool
+	Print          bool
+	Verbose        bool
+	SystemPrompt   string
+	ToolTimeout    time.Duration
+	Prompt         string
 }
 
 func Load() (Config, error) {
@@ -51,14 +60,23 @@ func Load() (Config, error) {
 	flag.IntVar(&cfg.MaxTokens, "max-tokens", 16384, "Max output tokens per model request")
 	flag.IntVar(&cfg.ContextBudget, "context-budget", 120000, "Approximate context token budget before automatic compaction; set 0 to disable")
 	flag.IntVar(&cfg.CompactKeep, "compact-keep", 12, "How many latest messages to keep verbatim during automatic compaction")
+	flag.BoolVar(&cfg.ReadOnly, "read-only", false, "Disable write_file and edit_file tool writes")
+	flag.BoolVar(&cfg.BashEnabled, "bash", true, "Enable or disable the bash tool")
 	flag.BoolVar(&cfg.Print, "print", false, "Run once and exit")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Print tool and agent lifecycle events")
 	flag.BoolVar(&cfg.Resume, "resume", false, "Resume the main session and known agents from the session file")
 	flag.DurationVar(&cfg.ToolTimeout, "tool-timeout", 2*time.Minute, "Per-tool execution timeout")
+	flag.DurationVar(&cfg.HookTimeout, "hook-timeout", 30*time.Second, "Timeout for each configured hook command")
 
 	systemPromptFile := flag.String("system-prompt-file", "", "Read the system prompt from a file")
 	cwdFlag := flag.String("cwd", "", "Working directory")
 	sessionFileFlag := flag.String("session-file", "", "Path to the persisted session file")
+	readRootsFlag := flag.String("allow-read", "", "Comma-separated read roots; the working directory is always included")
+	writeRootsFlag := flag.String("allow-write", "", "Comma-separated write roots; the working directory is always included unless --read-only is set")
+	hookBeforeToolFlag := flag.String("hook-before-tool", "", "Shell command to run before each tool call; non-zero exit blocks the tool")
+	hookAfterToolFlag := flag.String("hook-after-tool", "", "Shell command to run after each tool call")
+	hookAfterTurnFlag := flag.String("hook-after-turn", "", "Shell command to run after each turn")
+	hookAgentEventFlag := flag.String("hook-agent-event", "", "Shell command to run for agent lifecycle events")
 
 	flag.Parse()
 
@@ -88,6 +106,13 @@ func Load() (Config, error) {
 		cfg.SessionFile = filepath.Join(cfg.WorkingDir, ".xxx-code", "session.json")
 	}
 
+	cfg.ReadRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *readRootsFlag)...)
+	cfg.WriteRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *writeRootsFlag)...)
+	cfg.HookBeforeTool = strings.TrimSpace(*hookBeforeToolFlag)
+	cfg.HookAfterTool = strings.TrimSpace(*hookAfterToolFlag)
+	cfg.HookAfterTurn = strings.TrimSpace(*hookAfterTurnFlag)
+	cfg.HookAgentEvent = strings.TrimSpace(*hookAgentEventFlag)
+
 	cfg.SystemPrompt = defaultSystemPrompt
 	if *systemPromptFile != "" {
 		data, err := os.ReadFile(*systemPromptFile)
@@ -112,4 +137,21 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseRoots(base, raw string) []string {
+	parts := strings.Split(raw, ",")
+	roots := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if filepath.IsAbs(part) {
+			roots = append(roots, filepath.Clean(part))
+			continue
+		}
+		roots = append(roots, filepath.Join(base, part))
+	}
+	return roots
 }

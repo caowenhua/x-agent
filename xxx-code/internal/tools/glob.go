@@ -53,6 +53,9 @@ func (t *GlobTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, i
 	if err != nil {
 		return engine.ToolResult{}, err
 	}
+	if err := ensureReadAllowed(execCtx, execCtx.WorkingDir); err != nil {
+		return engine.ToolResult{}, err
+	}
 
 	var matches []string
 	err = filepath.WalkDir(execCtx.WorkingDir, func(path string, d os.DirEntry, walkErr error) error {

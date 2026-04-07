@@ -6,16 +6,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 )
 
 func resolvePath(cwd, raw string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	var path string
 	if filepath.IsAbs(raw) {
-		return raw, nil
+		path = raw
+	} else {
+		path = filepath.Join(cwd, raw)
 	}
-	return filepath.Join(cwd, raw), nil
+	return filepath.Abs(filepath.Clean(path))
 }
 
 func mustJSON(v any) string {
@@ -32,4 +37,18 @@ func ensureParentDir(path string) error {
 		return nil
 	}
 	return os.MkdirAll(dir, 0o755)
+}
+
+func ensureReadAllowed(execCtx *engine.ExecutionContext, path string) error {
+	if execCtx == nil {
+		return nil
+	}
+	return execCtx.EnsureReadPath(path)
+}
+
+func ensureWriteAllowed(execCtx *engine.ExecutionContext, path string) error {
+	if execCtx == nil {
+		return nil
+	}
+	return execCtx.EnsureWritePath(path)
 }
