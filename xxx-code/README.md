@@ -38,6 +38,7 @@ xxx-code/
 - `glob`
 - `grep`
 - `agent_spawn`
+- `agent_fanout`
 - `agent_send`
 - `agent_cancel`
 - `agent_wait`
@@ -63,6 +64,7 @@ REPL 内支持：
 - `:help`
 - `:agents`
 - `:wait <agent-id>`
+- `:wait-all [agent-id ...]`
 - `:send <agent-id> <prompt>`
 - `:cancel <agent-id>`
 - `:history [n]`
@@ -206,6 +208,27 @@ go run ./cmd/xxx-code \
 ```
 
 `agent_list` 和 `:agents` 都会显示 `queued / running / idle / failed / cancelled` 这些状态。
+
+## 批量编排
+
+现在还补了两组更适合 multi-agent orchestration 的原语：
+
+- `agent_fanout`: 一次起一批子 agent，可选 `wait=true` 直接回收整批结果
+- `agent_wait`: 除了单个 `agent_id`，现在也支持 `agent_ids` 数组和 `all=true`
+
+示例：
+
+```json
+{
+  "tasks": [
+    {"name": "reader", "prompt": "分析 README 并提炼风险"},
+    {"name": "tester", "prompt": "检查最近改动的测试缺口"}
+  ],
+  "wait": true
+}
+```
+
+这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join。
 
 ## 常用参数
 

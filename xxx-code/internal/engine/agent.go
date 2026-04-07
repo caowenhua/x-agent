@@ -325,6 +325,31 @@ func (r *Runner) WaitAgent(ctx context.Context, id string) (AgentSnapshot, error
 	}
 }
 
+func (r *Runner) WaitAgents(ctx context.Context, ids []string) ([]AgentSnapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	targetIDs := normalizeAgentIDs(ids)
+	if len(targetIDs) == 0 {
+		snapshots := r.ListAgents()
+		targetIDs = make([]string, 0, len(snapshots))
+		for _, snapshot := range snapshots {
+			targetIDs = append(targetIDs, snapshot.ID)
+		}
+	}
+
+	results := make([]AgentSnapshot, 0, len(targetIDs))
+	for _, id := range targetIDs {
+		snapshot, err := r.WaitAgent(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, snapshot)
+	}
+	return results, nil
+}
+
 func (r *Runner) ListAgents() []AgentSnapshot {
 	r.agentState.mu.RLock()
 	defer r.agentState.mu.RUnlock()
@@ -539,6 +564,23 @@ func appendUnique(values []string, value string) []string {
 		}
 	}
 	return append(values, value)
+}
+
+func normalizeAgentIDs(ids []string) []string {
+	normalized := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	return normalized
 }
 
 func (r *Runner) cloneForAgent(request SpawnRequest) *Runner {

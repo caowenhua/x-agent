@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
@@ -180,6 +181,133 @@ func (t *AgentSendTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 	return engine.ToolResult{Content: mustJSON(snapshot)}, nil
 }
 
+type agentTaskInput struct {
+	Name           string `json:"name,omitempty"`
+	Prompt         string `json:"prompt"`
+	Model          string `json:"model,omitempty"`
+	MaxTurns       int    `json:"max_turns,omitempty"`
+	InheritHistory bool   `json:"inherit_history,omitempty"`
+	WorkingDir     string `json:"working_dir,omitempty"`
+}
+
+type AgentFanoutTool struct{}
+
+type agentFanoutInput struct {
+	Tasks          []agentTaskInput `json:"tasks"`
+	Wait           bool             `json:"wait,omitempty"`
+	TimeoutSeconds int              `json:"timeout_seconds,omitempty"`
+}
+
+func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
+	return engine.ToolDefinition{
+		Name:        "agent_fanout",
+		Description: "Spawn a batch of sub-agents. Use wait=true to fan out first and then wait for the whole batch to finish.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"tasks": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name": map[string]any{
+								"type":        "string",
+								"description": "Optional short name for the sub-agent.",
+							},
+							"prompt": map[string]any{
+								"type":        "string",
+								"description": "Task for the sub-agent.",
+							},
+							"model": map[string]any{
+								"type":        "string",
+								"description": "Optional model override.",
+							},
+							"max_turns": map[string]any{
+								"type":        "integer",
+								"description": "Optional max turn override.",
+							},
+							"inherit_history": map[string]any{
+								"type":        "boolean",
+								"description": "Clone the current conversation into the child agent if true.",
+							},
+							"working_dir": map[string]any{
+								"type":        "string",
+								"description": "Optional working directory for the sub-agent.",
+							},
+						},
+						"required": []string{"prompt"},
+					},
+					"description": "Batch of sub-agent tasks to spawn.",
+				},
+				"wait": map[string]any{
+					"type":        "boolean",
+					"description": "Wait for the whole batch if true.",
+				},
+				"timeout_seconds": map[string]any{
+					"type":        "integer",
+					"description": "Optional timeout for the whole batch wait.",
+				},
+			},
+			"required": []string{"tasks"},
+		},
+	}
+}
+
+func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	var args agentFanoutInput
+	if err := json.Unmarshal(input, &args); err != nil {
+		return engine.ToolResult{}, err
+	}
+	if len(args.Tasks) == 0 {
+		return engine.ToolResult{}, fmt.Errorf("tasks must not be empty")
+	}
+
+	spawned := make([]engine.AgentSnapshot, 0, len(args.Tasks))
+	ids := make([]string, 0, len(args.Tasks))
+	for _, task := range args.Tasks {
+		snapshot, err := execCtx.Runner.SpawnAgent(execCtx, engine.SpawnRequest{
+			Name:           task.Name,
+			Prompt:         task.Prompt,
+			Background:     true,
+			Model:          task.Model,
+			MaxTurns:       task.MaxTurns,
+			InheritHistory: task.InheritHistory,
+			WorkingDir:     task.WorkingDir,
+		})
+		if err != nil {
+			return engine.ToolResult{}, err
+		}
+		spawned = append(spawned, snapshot)
+		ids = append(ids, snapshot.ID)
+	}
+
+	if !args.Wait {
+		return engine.ToolResult{
+			Content: mustJSON(map[string]any{
+				"agents": spawned,
+			}),
+		}, nil
+	}
+
+	waitCtx := ctx
+	if args.TimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, time.Duration(args.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+
+	snapshots, err := execCtx.Runner.WaitAgents(waitCtx, ids)
+	if err != nil {
+		return engine.ToolResult{}, err
+	}
+	return engine.ToolResult{
+		Content: mustJSON(map[string]any{
+			"agents": snapshots,
+		}),
+		IsError: hasAgentErrors(snapshots),
+	}, nil
+}
+
 type AgentCancelTool struct{}
 
 type agentCancelInput struct {
@@ -224,14 +352,16 @@ func (t *AgentCancelTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 type AgentWaitTool struct{}
 
 type agentWaitInput struct {
-	AgentID        string `json:"agent_id"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	AgentID        string   `json:"agent_id,omitempty"`
+	AgentIDs       []string `json:"agent_ids,omitempty"`
+	All            bool     `json:"all,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 }
 
 func (t *AgentWaitTool) Definition() engine.ToolDefinition {
 	return engine.ToolDefinition{
 		Name:        "agent_wait",
-		Description: "Wait for a sub-agent's current task to finish and return its latest snapshot.",
+		Description: "Wait for one or more sub-agents to finish. Use agent_id for one agent, agent_ids for many, or all=true for every known agent.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -239,12 +369,20 @@ func (t *AgentWaitTool) Definition() engine.ToolDefinition {
 					"type":        "string",
 					"description": "The ID returned by agent_spawn.",
 				},
+				"agent_ids": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Optional list of agent IDs to wait for.",
+				},
+				"all": map[string]any{
+					"type":        "boolean",
+					"description": "Wait for every known agent if true.",
+				},
 				"timeout_seconds": map[string]any{
 					"type":        "integer",
 					"description": "Optional timeout in seconds.",
 				},
 			},
-			"required": []string{"agent_id"},
 		},
 	}
 }
@@ -261,17 +399,42 @@ func (t *AgentWaitTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 		defer cancel()
 	}
 
-	snapshot, err := execCtx.Runner.WaitAgent(waitCtx, args.AgentID)
+	if strings.TrimSpace(args.AgentID) == "" && len(args.AgentIDs) == 0 && !args.All {
+		return engine.ToolResult{}, fmt.Errorf("one of agent_id, agent_ids, or all=true is required")
+	}
+
+	if strings.TrimSpace(args.AgentID) != "" && len(args.AgentIDs) == 0 && !args.All {
+		snapshot, err := execCtx.Runner.WaitAgent(waitCtx, args.AgentID)
+		if err != nil {
+			return engine.ToolResult{}, err
+		}
+		if isTerminalAgentError(snapshot.Status) {
+			return engine.ToolResult{
+				Content: mustJSON(snapshot),
+				IsError: true,
+			}, nil
+		}
+		return engine.ToolResult{Content: mustJSON(snapshot)}, nil
+	}
+
+	ids := args.AgentIDs
+	if strings.TrimSpace(args.AgentID) != "" {
+		ids = append([]string{args.AgentID}, ids...)
+	}
+	if args.All {
+		ids = nil
+	}
+
+	snapshots, err := execCtx.Runner.WaitAgents(waitCtx, ids)
 	if err != nil {
 		return engine.ToolResult{}, err
 	}
-	if isTerminalAgentError(snapshot.Status) {
-		return engine.ToolResult{
-			Content: mustJSON(snapshot),
-			IsError: true,
-		}, nil
-	}
-	return engine.ToolResult{Content: mustJSON(snapshot)}, nil
+	return engine.ToolResult{
+		Content: mustJSON(map[string]any{
+			"agents": snapshots,
+		}),
+		IsError: hasAgentErrors(snapshots),
+	}, nil
 }
 
 type AgentListTool struct{}
@@ -304,4 +467,13 @@ func (t *AgentListTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 
 func isTerminalAgentError(status engine.AgentStatus) bool {
 	return status == engine.AgentFailed || status == engine.AgentCancelled
+}
+
+func hasAgentErrors(snapshots []engine.AgentSnapshot) bool {
+	for _, snapshot := range snapshots {
+		if isTerminalAgentError(snapshot.Status) {
+			return true
+		}
+	}
+	return false
 }

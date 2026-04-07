@@ -45,6 +45,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		&tools.GlobTool{},
 		&tools.GrepTool{},
 		&tools.AgentSpawnTool{},
+		&tools.AgentFanoutTool{},
 		&tools.AgentSendTool{},
 		&tools.AgentCancelTool{},
 		&tools.AgentWaitTool{},
@@ -152,6 +153,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":quit                     save and exit the REPL")
 		fmt.Fprintln(a.out, ":agents                   list spawned agents")
 		fmt.Fprintln(a.out, ":wait <agent-id>          wait for an agent and print its snapshot")
+		fmt.Fprintln(a.out, ":wait-all [agent-id ...]  wait for a batch of agents or every known agent")
 		fmt.Fprintln(a.out, ":send <agent-id> <prompt> continue an existing agent")
 		fmt.Fprintln(a.out, ":cancel <agent-id>        cancel a running agent and its descendants")
 		fmt.Fprintln(a.out, ":history [n]              print the latest n main-session messages (default 10)")
@@ -179,6 +181,17 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 			return false, nil
 		}
 		data, _ := json.MarshalIndent(snapshot, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":wait-all":
+		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		snapshots, err := a.runner.WaitAgents(waitCtx, fields[1:])
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(snapshots, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
 	case ":send":

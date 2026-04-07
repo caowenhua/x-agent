@@ -444,3 +444,45 @@ func TestRunnerQueuesAgentsWhenConcurrencyIsLimited(t *testing.T) {
 		t.Fatalf("expected idle fast agent, got %s", fastDone.Status)
 	}
 }
+
+func TestRunnerWaitAgentsUsesAllKnownAgentsWhenIDsEmpty(t *testing.T) {
+	runner := NewRunner(&promptProvider{}, NewRegistry(), RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		MaxParallelAgents: 2,
+	})
+
+	first, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "one",
+		Prompt:     "first",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "two",
+		Prompt:     "second",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshots, err := runner.WaitAgents(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 2 {
+		t.Fatalf("expected 2 snapshots, got %d", len(snapshots))
+	}
+
+	got := map[string]AgentStatus{}
+	for _, snapshot := range snapshots {
+		got[snapshot.ID] = snapshot.Status
+	}
+	if got[first.ID] != AgentIdle || got[second.ID] != AgentIdle {
+		t.Fatalf("expected both agents idle, got %+v", got)
+	}
+}
