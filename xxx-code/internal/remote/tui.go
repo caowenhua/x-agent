@@ -328,7 +328,7 @@ func (m tuiModel) sidebarView() string {
 		"Ctrl+O   sidebar",
 		"Ctrl+C   quit",
 	}
-	if strings.TrimSpace(m.ui.app.config.RemoteToken) != "" {
+	if strings.TrimSpace(m.ui.app.config.RemoteToken) != "" || strings.TrimSpace(m.ui.app.config.RemoteTokenFile) != "" {
 		lines = append(lines[:4], append([]string{"auth       bearer"}, lines[4:]...)...)
 	}
 	return strings.Join(lines, "\n")

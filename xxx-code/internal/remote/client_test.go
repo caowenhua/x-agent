@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -327,6 +328,39 @@ func TestClientCanUseRemoteToken(t *testing.T) {
 	}
 	if session.ID != "protected" {
 		t.Fatalf("unexpected session: %+v", session)
+	}
+}
+
+func TestClientCanReloadRemoteTokenFile(t *testing.T) {
+	cfg := newTestConfig(t)
+	tokenFile := filepath.Join(t.TempDir(), "remote-token.txt")
+	if err := os.WriteFile(tokenFile, []byte("token-a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.DaemonTokenFile = tokenFile
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteTestProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClientWithTokenFile(httpServer.URL, "", tokenFile, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "rotating-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.RunTurn(context.Background(), session.ID, "first", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte("token-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.RunTurn(context.Background(), session.ID, "second", 0); err != nil {
+		t.Fatal(err)
 	}
 }
 

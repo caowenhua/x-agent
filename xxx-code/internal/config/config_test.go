@@ -96,9 +96,11 @@ func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 		"XXX_CODE_DAEMON_RATE_LIMIT_BURST":    "12",
 	}
 	cfg, err := LoadArgs([]string{
+		"--daemon-token-file", "secrets/daemon.token",
 		"--daemon-audit-file", "logs/audit.jsonl",
 		"--daemon-deny-modes", "mcp,audit",
 		"--daemon-allow-session-prefix", "team-",
+		"--remote-token-file", "secrets/remote.token",
 		"--daemon-rate-limit-per-minute", "30",
 	}, lookupFromMap(env), dir)
 	if err != nil {
@@ -107,6 +109,9 @@ func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 
 	if cfg.DaemonAuditFile != filepath.Join(dir, "logs", "audit.jsonl") {
 		t.Fatalf("unexpected daemon audit file: %q", cfg.DaemonAuditFile)
+	}
+	if cfg.DaemonTokenFile != filepath.Join(dir, "secrets", "daemon.token") {
+		t.Fatalf("unexpected daemon token file: %q", cfg.DaemonTokenFile)
 	}
 	if len(cfg.DaemonAllowModes) != 2 || cfg.DaemonAllowModes[0] != "sessions_read" || cfg.DaemonAllowModes[1] != "turns" {
 		t.Fatalf("unexpected daemon allow modes: %+v", cfg.DaemonAllowModes)
@@ -119,6 +124,9 @@ func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 	}
 	if len(cfg.DaemonDenySessionPrefixes) != 1 || cfg.DaemonDenySessionPrefixes[0] != "blocked-" {
 		t.Fatalf("unexpected daemon deny session prefixes: %+v", cfg.DaemonDenySessionPrefixes)
+	}
+	if cfg.RemoteTokenFile != filepath.Join(dir, "secrets", "remote.token") {
+		t.Fatalf("unexpected remote token file: %q", cfg.RemoteTokenFile)
 	}
 	if cfg.DaemonRateLimitPerMinute != 30 || cfg.DaemonRateLimitBurst != 12 {
 		t.Fatalf("unexpected daemon rate limit config: per_minute=%d burst=%d", cfg.DaemonRateLimitPerMinute, cfg.DaemonRateLimitBurst)

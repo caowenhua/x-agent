@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caowenhua/x-agent/xxx-code/internal/auth"
 	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
@@ -22,6 +23,7 @@ import (
 type Client struct {
 	baseURL    string
 	token      string
+	tokenFile  string
 	httpClient *http.Client
 }
 
@@ -117,6 +119,10 @@ type AuditEvent struct {
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
+	return NewClientWithTokenFile(baseURL, token, "", httpClient)
+}
+
+func NewClientWithTokenFile(baseURL, token, tokenFile string, httpClient *http.Client) *Client {
 	baseURL = strings.TrimSpace(baseURL)
 	baseURL = strings.TrimRight(baseURL, "/")
 	if httpClient == nil {
@@ -127,6 +133,7 @@ func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	return &Client{
 		baseURL:    baseURL,
 		token:      strings.TrimSpace(token),
+		tokenFile:  strings.TrimSpace(tokenFile),
 		httpClient: httpClient,
 	}
 }
@@ -284,7 +291,9 @@ func (c *Client) StreamTurn(ctx context.Context, sessionID, prompt string, timeo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	c.applyAuth(req)
+	if err := c.applyAuth(req); err != nil {
+		return TurnResult{}, SessionSummary{}, err
+	}
 	req.Header.Set(diag.TraceHeader, diag.NewTraceID())
 
 	resp, err := c.httpClient.Do(req)
@@ -570,7 +579,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody an
 	if requestBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	c.applyAuth(req)
+	if err := c.applyAuth(req); err != nil {
+		return err
+	}
 	req.Header.Set(diag.TraceHeader, diag.NewTraceID())
 
 	resp, err := c.httpClient.Do(req)
@@ -623,9 +634,17 @@ func withServerQuery(path, serverName string) string {
 	return path + "?" + values.Encode()
 }
 
-func (c *Client) applyAuth(req *http.Request) {
-	if req == nil || strings.TrimSpace(c.token) == "" {
-		return
+func (c *Client) applyAuth(req *http.Request) error {
+	if req == nil {
+		return nil
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	token, err := auth.CurrentToken(c.token, c.tokenFile)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(token) == "" {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }

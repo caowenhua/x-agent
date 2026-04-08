@@ -3,6 +3,7 @@
   "cwd": ".",
   "session_file": ".xxx-code/session.json",
   "daemon_dir": ".xxx-code/daemon",
+  "daemon_token_file": ".secrets/daemon-token.txt",
   "daemon_audit_file": ".xxx-code/daemon/audit.jsonl",
   "daemon_rate_limit_per_minute": 120,
   "daemon_rate_limit_burst": 20,
@@ -17,6 +18,7 @@
     "audit",
     "save"
   ],
+  "remote_token_file": ".secrets/daemon-token.txt",
   "mcp_config": ".mcp.json",
   "allow_read": [
     "."

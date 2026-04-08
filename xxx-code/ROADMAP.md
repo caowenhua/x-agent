@@ -64,8 +64,9 @@
   - 已补 request / auth failure / ACL deny / rate limit / tool / policy block / agent 事件记录
 - [x] daemon ACL
   - 已补 API mode 与 session prefix 级访问控制
-- [ ] token 轮换与部署建议
-  - 反向代理、TLS、最小暴露面
+- [x] token 轮换与部署建议
+  - 已补 `daemon_token_file` / `remote_token_file`
+  - 已补热更新 token 轮换、TLS 反代、最小暴露面说明
 - [x] 速率限制与资源上限
   - 已补 per-client request rate limit / burst
 
@@ -92,9 +93,9 @@
 
 当前默认推进顺序：
 
-1. 先补 token 轮换、TLS 反代和部署建议
-2. 再继续做 MCP / provider / hooks 这一层生态扩展
-3. 保持测试、审计和发布链路持续跟进
+1. 进入 P2 生态与扩展
+2. 优先做 MCP 管理增强
+3. 再继续做 provider / hooks / plugin 化
 
 ## 完成标准
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -218,6 +219,37 @@ func TestDaemonCanRequireBearerToken(t *testing.T) {
 	if len(payload["sessions"].([]any)) != 0 {
 		t.Fatalf("expected no sessions, got %+v", payload)
 	}
+}
+
+func TestDaemonCanReloadRotatingTokenFile(t *testing.T) {
+	cfg := newTestConfig(t)
+	tokenFile := filepath.Join(t.TempDir(), "daemon-token.txt")
+	if err := os.WriteFile(tokenFile, []byte("old-secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.DaemonTokenFile = tokenFile
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	doAuthorizedJSON(t, "old-secret", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions", nil), http.StatusOK)
+
+	if err := os.WriteFile(tokenFile, []byte(`["new-secret","old-secret"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doAuthorizedJSON(t, "old-secret", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions", nil), http.StatusOK)
+	doAuthorizedJSON(t, "new-secret", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions", nil), http.StatusOK)
+
+	if err := os.WriteFile(tokenFile, []byte("new-secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doAuthorizedJSON(t, "new-secret", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions", nil), http.StatusOK)
+	doAuthorizedJSON(t, "old-secret", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions", nil), http.StatusUnauthorized)
 }
 
 func TestManagedSessionCloseCancelsActiveTurnAndPersistsState(t *testing.T) {

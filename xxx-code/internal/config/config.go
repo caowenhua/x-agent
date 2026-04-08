@@ -42,6 +42,7 @@ type Config struct {
 	Daemon                     bool
 	DaemonListenAddr           string
 	DaemonToken                string
+	DaemonTokenFile            string
 	DaemonDir                  string
 	DaemonAuditFile            string
 	DaemonAllowModes           []string
@@ -52,6 +53,7 @@ type Config struct {
 	DaemonRateLimitBurst       int
 	RemoteURL                  string
 	RemoteToken                string
+	RemoteTokenFile            string
 	RemoteSession              string
 	RemoteList                 bool
 	WorkingDir                 string
@@ -97,6 +99,7 @@ type fileConfig struct {
 	Daemon                     *bool    `json:"daemon,omitempty"`
 	Listen                     *string  `json:"listen,omitempty"`
 	DaemonToken                *string  `json:"daemon_token,omitempty"`
+	DaemonTokenFile            *string  `json:"daemon_token_file,omitempty"`
 	DaemonDir                  *string  `json:"daemon_dir,omitempty"`
 	DaemonAuditFile            *string  `json:"daemon_audit_file,omitempty"`
 	DaemonAllowModes           []string `json:"daemon_allow_modes,omitempty"`
@@ -107,6 +110,7 @@ type fileConfig struct {
 	DaemonRateLimitBurst       *int     `json:"daemon_rate_limit_burst,omitempty"`
 	RemoteURL                  *string  `json:"remote_url,omitempty"`
 	RemoteToken                *string  `json:"remote_token,omitempty"`
+	RemoteTokenFile            *string  `json:"remote_token_file,omitempty"`
 	RemoteSession              *string  `json:"remote_session,omitempty"`
 	RemoteList                 *bool    `json:"remote_list_sessions,omitempty"`
 	WorkingDir                 *string  `json:"cwd,omitempty"`
@@ -142,8 +146,10 @@ type fileConfig struct {
 type rawOptions struct {
 	workingDir                 string
 	sessionFile                string
+	daemonTokenFile            string
 	daemonDir                  string
 	daemonAuditFile            string
+	remoteTokenFile            string
 	mcpConfigFile              string
 	systemPromptFile           string
 	readRoots                  []string
@@ -221,10 +227,10 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	fs.BoolVar(&cfg.Daemon, "daemon", cfg.Daemon, "Run xxx-code as a persistent HTTP daemon")
 	fs.StringVar(&cfg.DaemonListenAddr, "listen", cfg.DaemonListenAddr, "Listen address for daemon mode")
 	fs.StringVar(&cfg.DaemonToken, "daemon-token", cfg.DaemonToken, "Optional bearer token required by the daemon for /v1/* requests")
+	fs.StringVar(&cfg.RemoteToken, "remote-token", cfg.RemoteToken, "Bearer token to send when connecting to a protected daemon")
 	fs.IntVar(&cfg.DaemonRateLimitPerMinute, "daemon-rate-limit-per-minute", cfg.DaemonRateLimitPerMinute, "Optional per-client request rate limit for daemon /v1/* requests")
 	fs.IntVar(&cfg.DaemonRateLimitBurst, "daemon-rate-limit-burst", cfg.DaemonRateLimitBurst, "Burst capacity for the daemon per-client rate limiter")
 	fs.StringVar(&cfg.RemoteURL, "remote-url", cfg.RemoteURL, "Daemon base URL to use as a remote bridge")
-	fs.StringVar(&cfg.RemoteToken, "remote-token", cfg.RemoteToken, "Bearer token to send when connecting to a protected daemon")
 	fs.StringVar(&cfg.RemoteSession, "remote-session", cfg.RemoteSession, "Remote daemon session ID to open or create")
 	fs.BoolVar(&cfg.RemoteList, "remote-list-sessions", cfg.RemoteList, "List daemon sessions instead of running a local session")
 	fs.BoolVar(&cfg.ReadOnly, "read-only", cfg.ReadOnly, "Disable write_file and edit_file tool writes")
@@ -244,8 +250,10 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	systemPromptFileFlag := fs.String("system-prompt-file", raw.systemPromptFile, "Read the system prompt from a file")
 	cwdFlag := fs.String("cwd", raw.workingDir, "Working directory")
 	sessionFileFlag := fs.String("session-file", raw.sessionFile, "Path to the persisted session file")
+	daemonTokenFileFlag := fs.String("daemon-token-file", raw.daemonTokenFile, "Path to a bearer token file for daemon auth; supports rotation without restart")
 	daemonDirFlag := fs.String("daemon-dir", raw.daemonDir, "Directory for daemon-managed remote sessions")
 	daemonAuditFileFlag := fs.String("daemon-audit-file", raw.daemonAuditFile, "Path to the daemon JSONL audit log; defaults to <daemon-dir>/audit.jsonl")
+	remoteTokenFileFlag := fs.String("remote-token-file", raw.remoteTokenFile, "Path to a bearer token file used by the remote bridge; reread on each request")
 	mcpConfigFlag := fs.String("mcp-config", raw.mcpConfigFile, "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
 	readRootsFlag := fs.String("allow-read", joinCSV(raw.readRoots), "Comma-separated read roots; the working directory is always included")
 	writeRootsFlag := fs.String("allow-write", joinCSV(raw.writeRoots), "Comma-separated write roots; the working directory is always included unless --read-only is set")
@@ -289,8 +297,10 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 
 	cfg.WorkingDir = filepath.Clean(resolvePath(currentWD, *cwdFlag))
 	cfg.SessionFile = defaultSessionFile(cfg.WorkingDir, *sessionFileFlag)
+	cfg.DaemonTokenFile = resolveOptionalPath(cfg.WorkingDir, *daemonTokenFileFlag)
 	cfg.DaemonDir = defaultDaemonDir(cfg.WorkingDir, *daemonDirFlag)
 	cfg.DaemonAuditFile = defaultDaemonAuditFile(cfg.WorkingDir, cfg.DaemonDir, *daemonAuditFileFlag)
+	cfg.RemoteTokenFile = resolveOptionalPath(cfg.WorkingDir, *remoteTokenFileFlag)
 	cfg.LogFile = resolveOptionalPath(cfg.WorkingDir, *logFileFlag)
 	cfg.ConfigFile = strings.TrimSpace(*configFileFlag)
 	if cfg.ConfigFile != "" {
@@ -373,10 +383,10 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	applyBool(&cfg.Daemon, file.Daemon)
 	applyString(&cfg.DaemonListenAddr, file.Listen)
 	applyString(&cfg.DaemonToken, file.DaemonToken)
+	applyString(&cfg.RemoteToken, file.RemoteToken)
 	applyInt(&cfg.DaemonRateLimitPerMinute, file.DaemonRateLimitPerMinute)
 	applyInt(&cfg.DaemonRateLimitBurst, file.DaemonRateLimitBurst)
 	applyString(&cfg.RemoteURL, file.RemoteURL)
-	applyString(&cfg.RemoteToken, file.RemoteToken)
 	applyString(&cfg.RemoteSession, file.RemoteSession)
 	applyBool(&cfg.RemoteList, file.RemoteList)
 	applyBool(&cfg.ReadOnly, file.ReadOnly)
@@ -399,11 +409,17 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	if file.SessionFile != nil {
 		raw.sessionFile = strings.TrimSpace(*file.SessionFile)
 	}
+	if file.DaemonTokenFile != nil {
+		raw.daemonTokenFile = strings.TrimSpace(*file.DaemonTokenFile)
+	}
 	if file.DaemonDir != nil {
 		raw.daemonDir = strings.TrimSpace(*file.DaemonDir)
 	}
 	if file.DaemonAuditFile != nil {
 		raw.daemonAuditFile = strings.TrimSpace(*file.DaemonAuditFile)
+	}
+	if file.RemoteTokenFile != nil {
+		raw.remoteTokenFile = strings.TrimSpace(*file.RemoteTokenFile)
 	}
 	if file.MCPConfigFile != nil {
 		raw.mcpConfigFile = strings.TrimSpace(*file.MCPConfigFile)
@@ -480,11 +496,17 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 	if value, ok := lookup("XXX_CODE_DAEMON_TOKEN"); ok {
 		cfg.DaemonToken = strings.TrimSpace(value)
 	}
+	if value, ok := lookup("XXX_CODE_DAEMON_TOKEN_FILE"); ok {
+		raw.daemonTokenFile = strings.TrimSpace(value)
+	}
 	if value, ok := lookup("XXX_CODE_REMOTE_URL"); ok {
 		cfg.RemoteURL = strings.TrimSpace(value)
 	}
 	if value, ok := lookup("XXX_CODE_REMOTE_TOKEN"); ok {
 		cfg.RemoteToken = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_REMOTE_TOKEN_FILE"); ok {
+		raw.remoteTokenFile = strings.TrimSpace(value)
 	}
 	if value, ok := lookup("XXX_CODE_REMOTE_SESSION"); ok {
 		cfg.RemoteSession = strings.TrimSpace(value)

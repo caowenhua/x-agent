@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caowenhua/x-agent/xxx-code/internal/auth"
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
 	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
@@ -1513,15 +1514,30 @@ func writeMethodNotAllowed(w http.ResponseWriter, methods ...string) {
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
-	token := strings.TrimSpace(s.config.DaemonToken)
-	if token == "" {
+	tokens, err := auth.CurrentTokens(s.config.DaemonToken, s.config.DaemonTokenFile)
+	if err != nil {
+		s.auditLog(r.Context(), AuditEvent{
+			Action:  "auth",
+			Outcome: "error",
+			Code:    "token_source_error",
+			Message: err.Error(),
+			Method:  r.Method,
+			Path:    r.URL.Path,
+		})
+		writeError(w, http.StatusInternalServerError, err)
+		return false
+	}
+	if len(tokens) == 0 {
 		return true
 	}
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	parts := strings.Fields(auth)
-	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") &&
-		subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) == 1 {
-		return true
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		for _, token := range tokens {
+			if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) == 1 {
+				return true
+			}
+		}
 	}
 	s.auditLog(r.Context(), AuditEvent{
 		Action:  "auth",

@@ -128,7 +128,9 @@ go run ./cmd/xxx-code --config /path/to/config.json
 - `XXX_CODE_MODEL`
 - `XXX_CODE_REMOTE_URL`
 - `XXX_CODE_REMOTE_TOKEN`
+- `XXX_CODE_REMOTE_TOKEN_FILE`
 - `XXX_CODE_DAEMON_TOKEN`
+- `XXX_CODE_DAEMON_TOKEN_FILE`
 - `XXX_CODE_DAEMON_AUDIT_FILE`
 - `XXX_CODE_DAEMON_ALLOW_MODES`
 - `XXX_CODE_DAEMON_DENY_MODES`
@@ -226,6 +228,15 @@ go run ./cmd/xxx-code \
   --daemon-token dev-secret
 ```
 
+如果你更想把 token 放在文件里，并且支持不重启 daemon 的轮换，可以改成：
+
+```bash
+go run ./cmd/xxx-code \
+  --daemon \
+  --listen 127.0.0.1:7331 \
+  --daemon-token-file .secrets/daemon-token.txt
+```
+
 如果你还希望 daemon 自带基础治理能力，可以再加上审计、ACL 和限流：
 
 ```bash
@@ -246,6 +257,7 @@ go run ./cmd/xxx-code \
 - `daemon_allow_modes / daemon_deny_modes`: 控制哪些 API 面可以调
 - `daemon_allow_session_prefix / daemon_deny_session_prefix`: 控制哪些 session ID 前缀可访问
 - `daemon_rate_limit_per_minute / daemon_rate_limit_burst`: 控制每个 client address 的请求速率
+- `daemon_token_file`: 从文件读取一个或多个 bearer token，并在每次请求时重新读取，支持轮换
 
 daemon 会把远程 session 存到：
 
@@ -379,6 +391,15 @@ go run ./cmd/xxx-code \
   --remote-session repo-main
 ```
 
+如果你也想让 remote bridge 跟着 secret 文件自动切换 token，可以改成：
+
+```bash
+go run ./cmd/xxx-code \
+  --remote-url http://127.0.0.1:7331 \
+  --remote-token-file .secrets/daemon-token.txt \
+  --remote-session repo-main
+```
+
 或者单次远程执行一轮：
 
 ```bash
@@ -450,7 +471,7 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:quit`
 
 这一路径下，本地 CLI 不需要直接配置 `ANTHROPIC_API_KEY`，模型调用和 session 持久化都由 daemon 负责。
-如果 daemon 开了 `--daemon-token`，remote bridge 会用 `--remote-token` 或环境变量 `XXX_CODE_REMOTE_TOKEN` 自动发 `Authorization: Bearer ...`。
+如果 daemon 开了 `--daemon-token` 或 `--daemon-token-file`，remote bridge 会用 `--remote-token`、`--remote-token-file` 或环境变量里的对应值自动发 `Authorization: Bearer ...`。
 
 默认情况下，`--remote-url` 会沿用 `--stream=true`，所以远程单次执行和远程 REPL 也会边收到文本边打印；如果你更想等整轮结束后再输出，可以显式关掉：
 
@@ -802,6 +823,37 @@ daemon 审计日志默认会写到：
 - `GET /v1/sessions/{id}/audit?limit=50`
 
 其中 session 级 audit 更适合排一个具体任务或 workflow；全局 audit 更适合查 auth failure、ACL deny 和速率限制。
+
+## Token 轮换与部署
+
+`daemon_token_file` 和 `remote_token_file` 都支持几种格式：
+
+- 单个纯文本 token
+- 多行 token
+- 逗号分隔 token
+- JSON string
+- JSON array
+- JSON object，例如 `{"token":"..."}`
+  或 `{"tokens":["new","old"]}`
+
+推荐的轮换方式是：
+
+1. 先把 daemon token file 写成 `["new-token","old-token"]`
+2. 更新 remote/client 侧 token file，让它开始发送 `new-token`
+3. 确认新 token 全部生效后，把 daemon token file 收敛成 `["new-token"]`
+
+这套方式不需要重启 daemon，因为服务端和 remote bridge 都会在每次请求时重新读取 token file。
+
+部署上建议遵守这几个最小原则：
+
+- daemon 继续只监听 `127.0.0.1`，除非你真的需要跨机访问
+- 对外暴露时优先放在 TLS reverse proxy 后面，而不是直接把 daemon 端口暴露到公网
+- bearer token 放在受限权限的 secret 文件里，例如 `0600`
+- 生产环境优先走内网、SSH tunnel、Tailscale 或反向代理，不要把裸 `/v1/*` API 直接暴露到互联网
+
+更完整的部署建议见：
+
+- [daemon-deployment.md](/Users/tt/goworkspace/src/x-agent/xxx-code/docs/daemon-deployment.md)
 
 ## 常用参数
 
