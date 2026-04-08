@@ -66,6 +66,9 @@ func (a *App) Run(ctx context.Context) error {
 		a.sessionID = updated.ID
 		return nil
 	}
+	if a.config.TUI {
+		return a.runTUI(ctx)
+	}
 
 	return a.runREPL(ctx)
 }

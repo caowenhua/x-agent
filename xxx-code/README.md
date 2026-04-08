@@ -231,6 +231,15 @@ go run ./cmd/xxx-code \
   --remote-session repo-main
 ```
 
+远程 daemon 也可以直接进 TUI：
+
+```bash
+go run ./cmd/xxx-code \
+  --remote-url http://127.0.0.1:7331 \
+  --remote-session repo-main \
+  --tui
+```
+
 如果远端 daemon 开了 token，就再加上：
 
 ```bash

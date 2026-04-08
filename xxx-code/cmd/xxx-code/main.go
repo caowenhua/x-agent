@@ -41,10 +41,6 @@ func main() {
 	}
 
 	if cfg.RemoteURL != "" {
-		if cfg.TUI {
-			fmt.Fprintln(os.Stderr, "config error: --remote-url cannot be combined with --tui")
-			os.Exit(1)
-		}
 		app := remote.New(cfg, os.Stdout, os.Stderr)
 		if err := app.Run(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "run error: %v\n", err)
