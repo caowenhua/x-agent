@@ -26,7 +26,9 @@ type Client struct {
 
 type Error struct {
 	StatusCode int
+	Code       string
 	Message    string
+	Retryable  bool
 }
 
 type SessionSummary struct {
@@ -75,14 +77,16 @@ type HookConfig struct {
 }
 
 type TurnStreamEvent struct {
-	Type      string          `json:"type"`
-	AgentID   string          `json:"agent_id,omitempty"`
-	AgentName string          `json:"agent_name,omitempty"`
-	ToolName  string          `json:"tool_name,omitempty"`
-	Text      string          `json:"text,omitempty"`
-	Result    *TurnResult     `json:"result,omitempty"`
-	Session   *SessionSummary `json:"session,omitempty"`
-	Error     string          `json:"error,omitempty"`
+	Type         string          `json:"type"`
+	AgentID      string          `json:"agent_id,omitempty"`
+	AgentName    string          `json:"agent_name,omitempty"`
+	ToolName     string          `json:"tool_name,omitempty"`
+	Text         string          `json:"text,omitempty"`
+	Result       *TurnResult     `json:"result,omitempty"`
+	Session      *SessionSummary `json:"session,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	ErrorCode    string          `json:"error_code,omitempty"`
+	ErrorRetryOK bool            `json:"retryable,omitempty"`
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
@@ -104,10 +108,19 @@ func (e *Error) Error() string {
 	if e == nil {
 		return ""
 	}
-	if e.Message == "" {
+	if e.Message == "" && e.Code == "" {
 		return fmt.Sprintf("remote daemon returned status %d", e.StatusCode)
 	}
-	return fmt.Sprintf("remote daemon returned status %d: %s", e.StatusCode, e.Message)
+	if e.StatusCode > 0 {
+		if e.Code != "" {
+			return fmt.Sprintf("remote daemon returned status %d (%s): %s", e.StatusCode, e.Code, e.Message)
+		}
+		return fmt.Sprintf("remote daemon returned status %d: %s", e.StatusCode, e.Message)
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("remote daemon error (%s): %s", e.Code, e.Message)
+	}
+	return e.Message
 }
 
 func (c *Client) BaseURL() string {
@@ -229,20 +242,7 @@ func (c *Client) StreamTurn(ctx context.Context, sessionID, prompt string, timeo
 		if readErr != nil {
 			return TurnResult{}, SessionSummary{}, readErr
 		}
-		var remoteErr struct {
-			Error string `json:"error"`
-		}
-		if len(bytes.TrimSpace(body)) > 0 {
-			_ = json.Unmarshal(body, &remoteErr)
-		}
-		message := strings.TrimSpace(remoteErr.Error)
-		if message == "" {
-			message = strings.TrimSpace(string(body))
-		}
-		return TurnResult{}, SessionSummary{}, &Error{
-			StatusCode: resp.StatusCode,
-			Message:    message,
-		}
+		return TurnResult{}, SessionSummary{}, parseRemoteError(resp.StatusCode, body)
 	}
 
 	parser := newSSEParser(resp.Body)
@@ -266,7 +266,11 @@ func (c *Client) StreamTurn(ctx context.Context, sessionID, prompt string, timeo
 			handle(event)
 		}
 		if event.Error != "" {
-			return TurnResult{}, SessionSummary{}, errors.New(event.Error)
+			return TurnResult{}, SessionSummary{}, &Error{
+				Code:      strings.TrimSpace(event.ErrorCode),
+				Message:   strings.TrimSpace(event.Error),
+				Retryable: event.ErrorRetryOK,
+			}
 		}
 		if event.Result != nil && event.Session != nil {
 			return *event.Result, *event.Session, nil
@@ -496,25 +500,33 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody an
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var remoteErr struct {
-			Error string `json:"error"`
-		}
-		if len(bytes.TrimSpace(data)) > 0 {
-			_ = json.Unmarshal(data, &remoteErr)
-		}
-		message := strings.TrimSpace(remoteErr.Error)
-		if message == "" {
-			message = strings.TrimSpace(string(data))
-		}
-		return &Error{
-			StatusCode: resp.StatusCode,
-			Message:    message,
-		}
+		return parseRemoteError(resp.StatusCode, data)
 	}
 	if responseBody == nil || len(bytes.TrimSpace(data)) == 0 {
 		return nil
 	}
 	return json.Unmarshal(data, responseBody)
+}
+
+func parseRemoteError(statusCode int, data []byte) *Error {
+	var payload struct {
+		Error     string `json:"error"`
+		Code      string `json:"code"`
+		Retryable bool   `json:"retryable"`
+	}
+	if len(bytes.TrimSpace(data)) > 0 {
+		_ = json.Unmarshal(data, &payload)
+	}
+	message := strings.TrimSpace(payload.Error)
+	if message == "" {
+		message = strings.TrimSpace(string(data))
+	}
+	return &Error{
+		StatusCode: statusCode,
+		Code:       strings.TrimSpace(payload.Code),
+		Message:    message,
+		Retryable:  payload.Retryable,
+	}
 }
 
 func withServerQuery(path, serverName string) string {

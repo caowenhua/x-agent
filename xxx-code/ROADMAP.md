@@ -21,15 +21,14 @@
 
 ## P0 稳定性
 
-- [~] 端到端集成测试
-  - 覆盖 local / daemon / remote bridge / auth / streaming / workflow 的完整回归链路
-  - 当前状态：已开始
-- [ ] 并发与恢复压测
-  - 重点验证多 session、多 agent、workflow 重试、resume、stream 断连
-- [ ] daemon 生命周期收紧
-  - 优雅关闭、长连接中断、autosave 一致性、stream 断连收尾
-- [ ] 错误模型统一
-  - 统一 API status、可判别错误类型、用户可理解的错误输出
+- [x] 端到端集成测试
+  - 已覆盖 daemon / remote bridge / auth / streaming / workflow / restart 的完整回归链路
+- [x] 并发与恢复压测
+  - 已补多 session 并发、daemon restart 后 transcript 恢复、`go test -race ./...`
+- [x] daemon 生命周期收紧
+  - 已补 active turn cancel、关闭时 agent 收敛、订阅关闭、事件背压保护
+- [x] 错误模型统一
+  - 已补结构化 `error/code/retryable`、remote 端统一解析、timeout/cancel/not found/conflict 判别
 
 ## P1 发布能力
 

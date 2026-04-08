@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,6 +43,15 @@ func (p *streamingEchoProvider) CreateMessageStream(ctx context.Context, request
 }
 
 type orchestrationProvider struct{}
+
+type parallelProvider struct {
+	active int32
+	max    int32
+	ready  chan struct{}
+	once   sync.Once
+}
+
+type delayedEchoProvider struct{}
 
 func (p *orchestrationProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
@@ -90,6 +101,42 @@ func (p *orchestrationProvider) CreateMessage(ctx context.Context, request engin
 			Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+prompt),
 		}, nil
 	}
+}
+
+func (p *parallelProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	current := atomic.AddInt32(&p.active, 1)
+	defer atomic.AddInt32(&p.active, -1)
+
+	for {
+		max := atomic.LoadInt32(&p.max)
+		if current <= max || atomic.CompareAndSwapInt32(&p.max, max, current) {
+			break
+		}
+	}
+
+	p.once.Do(func() {
+		close(p.ready)
+	})
+	select {
+	case <-ctx.Done():
+		return engine.CompletionResponse{}, ctx.Err()
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestUserText(request.Messages)),
+	}, nil
+}
+
+func (p *delayedEchoProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	select {
+	case <-ctx.Done():
+		return engine.CompletionResponse{}, ctx.Err()
+	case <-time.After(40 * time.Millisecond):
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestUserText(request.Messages)),
+	}, nil
 }
 
 func TestRemoteStreamingRoundTripSurvivesDaemonRestart(t *testing.T) {
@@ -226,6 +273,124 @@ func TestRemoteDaemonCanExecuteWorkflowTurn(t *testing.T) {
 	}
 	if workflows[0].Status != "completed" {
 		t.Fatalf("expected completed workflow, got %+v", workflows[0])
+	}
+}
+
+func TestRemoteDaemonCanRunIndependentSessionsInParallel(t *testing.T) {
+	provider := &parallelProvider{ready: make(chan struct{})}
+	server, httpServer, cfg := newDaemonHarness(t, provider, func(cfg *config.Config) {
+		cfg.MaxParallelAgents = 4
+	})
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	sessionA, err := client.EnsureSession(context.Background(), "parallel-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionB, err := client.EnsureSession(context.Background(), "parallel-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, _, runErr := client.RunTurn(context.Background(), sessionA.ID, "first parallel turn", 0)
+		errCh <- runErr
+	}()
+
+	select {
+	case <-provider.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first parallel turn to start")
+	}
+
+	go func() {
+		_, _, runErr := client.RunTurn(context.Background(), sessionB.ID, "second parallel turn", 0)
+		errCh <- runErr
+	}()
+
+	for i := 0; i < 2; i++ {
+		if runErr := <-errCh; runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+
+	if got := atomic.LoadInt32(&provider.max); got < 2 {
+		t.Fatalf("expected daemon to allow concurrent sessions, max provider concurrency was %d", got)
+	}
+}
+
+func TestRemoteDaemonConcurrentBurstPersistsSessionsAcrossRestart(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonToken = "burst-secret"
+
+	serverA := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &delayedEchoProvider{}
+	})
+	httpA := httptest.NewServer(serverA.Handler())
+
+	clientA := remote.NewClient(httpA.URL, cfg.DaemonToken, httpA.Client())
+	sessionIDs := []string{
+		"burst-a",
+		"burst-b",
+		"burst-c",
+		"burst-d",
+		"burst-e",
+		"burst-f",
+	}
+
+	errCh := make(chan error, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		sessionID := sessionID
+		go func() {
+			session, err := clientA.EnsureSession(context.Background(), sessionID)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			for _, prompt := range []string{"first " + sessionID, "second " + sessionID} {
+				if _, _, err := clientA.RunTurn(context.Background(), session.ID, prompt, 0); err != nil {
+					errCh <- err
+					return
+				}
+			}
+			errCh <- nil
+		}()
+	}
+
+	for range sessionIDs {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	httpA.Close()
+	if err := serverA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	serverB := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &delayedEchoProvider{}
+	})
+	httpB := httptest.NewServer(serverB.Handler())
+	defer func() {
+		httpB.Close()
+		_ = serverB.Close()
+	}()
+
+	clientB := remote.NewClient(httpB.URL, cfg.DaemonToken, httpB.Client())
+	for _, sessionID := range sessionIDs {
+		session, err := clientB.GetSession(context.Background(), sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if session.MessageCount != 4 {
+			t.Fatalf("expected 4 messages after restart for %s, got %+v", sessionID, session)
+		}
 	}
 }
 

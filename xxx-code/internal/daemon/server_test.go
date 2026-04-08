@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +15,14 @@ import (
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
 )
 
 type daemonTestProvider struct{}
+
+type blockingProvider struct {
+	started chan struct{}
+}
 
 func (p *daemonTestProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
@@ -30,6 +36,17 @@ func (p *daemonTestProvider) CreateMessage(ctx context.Context, request engine.C
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+text),
 	}, nil
+}
+
+func (p *blockingProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = request
+	select {
+	case <-p.started:
+	default:
+		close(p.started)
+	}
+	<-ctx.Done()
+	return engine.CompletionResponse{}, ctx.Err()
 }
 
 func TestDaemonSessionLifecycle(t *testing.T) {
@@ -171,6 +188,123 @@ func TestDaemonCanRequireBearerToken(t *testing.T) {
 	payload := doJSON(t, req, http.StatusOK)
 	if len(payload["sessions"].([]any)) != 0 {
 		t.Fatalf("expected no sessions, got %+v", payload)
+	}
+}
+
+func TestManagedSessionCloseCancelsActiveTurnAndPersistsState(t *testing.T) {
+	cfg := newTestConfig(t)
+	provider := &blockingProvider{started: make(chan struct{})}
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return provider
+	})
+	session, err := server.openSession(context.Background(), "closing-session", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, runErr := session.runTurn(context.Background(), "block until close")
+		errCh <- runErr
+	}()
+
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for blocking turn to start")
+	}
+
+	if err := session.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case runErr := <-errCh:
+		if !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("expected close to cancel the active turn, got %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for active turn to stop during close")
+	}
+
+	state, err := persist.Load(session.sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Main) != 1 {
+		t.Fatalf("expected partially completed turn to be persisted, got %d messages", len(state.Main))
+	}
+	if got := strings.TrimSpace(state.Main[0].Text()); got != "block until close" {
+		t.Fatalf("unexpected persisted message: %q", got)
+	}
+}
+
+func TestManagedSessionPublishEventDoesNotBlockOnSlowSubscriber(t *testing.T) {
+	session := &managedSession{
+		subs: make(map[int]*eventSubscriber),
+	}
+	session.subs[1] = &eventSubscriber{ch: make(chan engine.Event, 1)}
+	session.subs[1].ch <- engine.Event{Kind: engine.EventAssistantText}
+
+	done := make(chan struct{})
+	go func() {
+		session.publishEvent(engine.Event{Kind: engine.EventToolCall})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("publishEvent blocked on a full subscriber channel")
+	}
+
+	if got := len(session.subs[1].ch); got != 1 {
+		t.Fatalf("expected bounded subscriber buffer to stay full at 1 item, got %d", got)
+	}
+}
+
+func TestDaemonErrorsIncludeStructuredCode(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonToken = "secret-token"
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/sessions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["code"] != "unauthorized" {
+		t.Fatalf("expected unauthorized code, got %+v", payload)
+	}
+
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/sessions/missing-session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer secret-token")
+	payload = doJSON(t, req, http.StatusNotFound)
+	if payload["code"] != "session_not_found" {
+		t.Fatalf("expected session_not_found code, got %+v", payload)
 	}
 }
 

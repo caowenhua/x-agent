@@ -33,6 +33,8 @@ func (p *remoteTestProvider) CreateMessage(ctx context.Context, request engine.C
 
 type remoteStreamingTestProvider struct{}
 
+type remoteBlockingProvider struct{}
+
 func (p *remoteStreamingTestProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 	prompt := latestRemoteUserText(request.Messages)
@@ -53,6 +55,12 @@ func (p *remoteStreamingTestProvider) CreateMessageStream(ctx context.Context, r
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+prompt),
 	}, nil
+}
+
+func (p *remoteBlockingProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = request
+	<-ctx.Done()
+	return engine.CompletionResponse{}, ctx.Err()
 }
 
 func TestClientSessionLifecycle(t *testing.T) {
@@ -171,6 +179,9 @@ func TestClientCanInspectPolicyHooksAndMCPStatus(t *testing.T) {
 	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != 400 {
 		t.Fatalf("expected 400 remote error, got %v", err)
 	}
+	if remoteErr.Code != "mcp_not_configured" {
+		t.Fatalf("expected mcp_not_configured code, got %+v", remoteErr)
+	}
 }
 
 func TestClientStreamTurn(t *testing.T) {
@@ -228,6 +239,9 @@ func TestClientCanUseRemoteToken(t *testing.T) {
 	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != 401 {
 		t.Fatalf("expected 401 from unauthorized client, got %v", err)
 	}
+	if remoteErr.Code != "unauthorized" {
+		t.Fatalf("expected unauthorized code, got %+v", remoteErr)
+	}
 
 	authorized := NewClient(httpServer.URL, "shared-secret", httpServer.Client())
 	session, err := authorized.EnsureSession(context.Background(), "protected")
@@ -236,6 +250,72 @@ func TestClientCanUseRemoteToken(t *testing.T) {
 	}
 	if session.ID != "protected" {
 		t.Fatalf("unexpected session: %+v", session)
+	}
+}
+
+func TestClientStreamTurnReturnsStructuredTimeoutError(t *testing.T) {
+	cfg := newTestConfig(t)
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteBlockingProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "stream-timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = client.StreamTurn(context.Background(), session.ID, "hang", 1, nil)
+	if err == nil {
+		t.Fatal("expected streaming turn to time out")
+	}
+	var remoteErr *Error
+	if !errors.As(err, &remoteErr) {
+		t.Fatalf("expected structured remote error, got %v", err)
+	}
+	if remoteErr.Code != "timeout" || !remoteErr.Retryable {
+		t.Fatalf("expected retryable timeout code, got %+v", remoteErr)
+	}
+}
+
+func TestClientParsesStructuredConflictAndNotFoundErrors(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	session, err := client.CreateSession(context.Background(), "conflict-session", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ID != "conflict-session" {
+		t.Fatalf("unexpected session: %+v", session)
+	}
+
+	_, err = client.CreateSession(context.Background(), "conflict-session", false)
+	if err == nil {
+		t.Fatal("expected duplicate session creation to fail")
+	}
+	var remoteErr *Error
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != 409 {
+		t.Fatalf("expected 409 conflict error, got %v", err)
+	}
+	if remoteErr.Code != "session_exists" {
+		t.Fatalf("expected session_exists code, got %+v", remoteErr)
+	}
+
+	_, err = client.GetSession(context.Background(), "missing-session")
+	if err == nil {
+		t.Fatal("expected missing session lookup to fail")
+	}
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != 404 {
+		t.Fatalf("expected 404 not found error, got %v", err)
+	}
+	if remoteErr.Code != "session_not_found" {
+		t.Fatalf("expected session_not_found code, got %+v", remoteErr)
 	}
 }
 

@@ -56,7 +56,11 @@ type managedSession struct {
 	runMu  sync.Mutex
 	subMu  sync.Mutex
 	subSeq int
-	subs   map[int]chan engine.Event
+	subs   map[int]*eventSubscriber
+
+	lifecycleMu      sync.Mutex
+	closed           bool
+	activeTurnCancel context.CancelFunc
 }
 
 type sessionSummary struct {
@@ -122,20 +126,26 @@ type sessionHookConfig struct {
 }
 
 type turnStreamEvent struct {
-	Type      string           `json:"type"`
-	AgentID   string           `json:"agent_id,omitempty"`
-	AgentName string           `json:"agent_name,omitempty"`
-	ToolName  string           `json:"tool_name,omitempty"`
-	Text      string           `json:"text,omitempty"`
-	Result    *streamRunResult `json:"result,omitempty"`
-	Session   *sessionSummary  `json:"session,omitempty"`
-	Error     string           `json:"error,omitempty"`
+	Type         string           `json:"type"`
+	AgentID      string           `json:"agent_id,omitempty"`
+	AgentName    string           `json:"agent_name,omitempty"`
+	ToolName     string           `json:"tool_name,omitempty"`
+	Text         string           `json:"text,omitempty"`
+	Result       *streamRunResult `json:"result,omitempty"`
+	Session      *sessionSummary  `json:"session,omitempty"`
+	Error        string           `json:"error,omitempty"`
+	ErrorCode    string           `json:"error_code,omitempty"`
+	ErrorRetryOK bool             `json:"retryable,omitempty"`
 }
 
 type streamRunResult struct {
 	FinalText string           `json:"final_text"`
 	Usage     map[string]int   `json:"usage"`
 	Messages  []engine.Message `json:"messages"`
+}
+
+type eventSubscriber struct {
+	ch chan engine.Event
 }
 
 func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFactory) *Server {
@@ -187,8 +197,9 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) Close() error {
 	s.mu.Lock()
 	sessions := make([]*managedSession, 0, len(s.sessions))
-	for _, session := range s.sessions {
+	for id, session := range s.sessions {
 		sessions = append(sessions, session)
+		delete(s.sessions, id)
 	}
 	s.mu.Unlock()
 
@@ -494,7 +505,10 @@ func (s *Server) handleTurnStream(w http.ResponseWriter, r *http.Request, sessio
 
 	for {
 		select {
-		case event := <-subscription.events:
+		case event, ok := <-subscription.events:
+			if !ok {
+				return
+			}
 			if err := writeSSE(w, "event", turnStreamEvent{
 				Type:      string(event.Kind),
 				AgentID:   event.AgentID,
@@ -507,9 +521,12 @@ func (s *Server) handleTurnStream(w http.ResponseWriter, r *http.Request, sessio
 			flusher.Flush()
 		case outcome := <-resultCh:
 			if outcome.err != nil {
+				meta := errorMetaForStatus(http.StatusInternalServerError, outcome.err)
 				_ = writeSSE(w, "error", turnStreamEvent{
-					Type:  "error",
-					Error: outcome.err.Error(),
+					Type:         "error",
+					Error:        outcome.err.Error(),
+					ErrorCode:    meta.Code,
+					ErrorRetryOK: meta.Retryable,
 				})
 				flusher.Flush()
 				return
@@ -797,7 +814,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		errOut:      s.errOut,
 		sessionFile: file,
 		loadedAt:    time.Now().UTC(),
-		subs:        make(map[int]chan engine.Event),
+		subs:        make(map[int]*eventSubscriber),
 	}
 	ms.workflowManager = tools.NewWorkflowManager()
 	ms.registry = engine.NewRegistry(
@@ -945,7 +962,13 @@ func (m *managedSession) runTurn(ctx context.Context, prompt string) (engine.Run
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
 
-	result, err := m.runner.RunTurn(ctx, m.session, prompt)
+	runCtx, release, err := m.beginTurn(ctx)
+	if err != nil {
+		return engine.RunResult{}, err
+	}
+	defer release()
+
+	result, err := m.runner.RunTurn(runCtx, m.session, prompt)
 	if err != nil {
 		return result, err
 	}
@@ -1022,12 +1045,33 @@ func (m *managedSession) save() error {
 }
 
 func (m *managedSession) close() error {
-	m.saveMu.Lock()
-	defer m.saveMu.Unlock()
-	if m.mcpManager != nil {
-		return m.mcpManager.Close()
+	cancel := m.markClosed()
+	if cancel != nil {
+		cancel()
 	}
-	return nil
+	m.closeSubscriptions()
+
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	var errs []error
+	for _, agent := range m.runner.ListAgents() {
+		if agent.Status != engine.AgentRunning && agent.Status != engine.AgentQueued {
+			continue
+		}
+		if _, err := m.runner.CancelAgent(context.Background(), agent.ID, true); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := m.save(); err != nil {
+		errs = append(errs, err)
+	}
+	if m.mcpManager != nil {
+		if err := m.mcpManager.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (m *managedSession) handleEvent(event engine.Event) {
@@ -1046,31 +1090,36 @@ type eventSubscription struct {
 }
 
 func (m *managedSession) subscribeEvents() eventSubscription {
-	ch := make(chan engine.Event, 512)
 	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	if m.isClosed() {
+		ch := make(chan engine.Event)
+		close(ch)
+		return eventSubscription{
+			events: ch,
+			close:  func() {},
+		}
+	}
+	ch := make(chan engine.Event, 512)
 	id := m.subSeq
 	m.subSeq++
-	m.subs[id] = ch
-	m.subMu.Unlock()
+	m.subs[id] = &eventSubscriber{ch: ch}
 	return eventSubscription{
 		events: ch,
 		close: func() {
-			m.subMu.Lock()
-			delete(m.subs, id)
-			m.subMu.Unlock()
+			m.unsubscribeEvent(id)
 		},
 	}
 }
 
 func (m *managedSession) publishEvent(event engine.Event) {
 	m.subMu.Lock()
-	subscribers := make([]chan engine.Event, 0, len(m.subs))
-	for _, ch := range m.subs {
-		subscribers = append(subscribers, ch)
-	}
-	m.subMu.Unlock()
-	for _, ch := range subscribers {
-		ch <- event
+	defer m.subMu.Unlock()
+	for _, subscriber := range m.subs {
+		select {
+		case subscriber.ch <- event:
+		default:
+		}
 	}
 }
 
@@ -1121,8 +1170,12 @@ func writeSSEComment(w io.Writer, comment string) error {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	meta := errorMetaForStatus(status, err)
+	status = normalizeErrorStatus(status, err)
 	writeJSON(w, status, map[string]any{
-		"error": err.Error(),
+		"error":     meta.Message,
+		"code":      meta.Code,
+		"retryable": meta.Retryable,
 	})
 }
 
@@ -1145,6 +1198,164 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="xxx-code"`)
 	writeError(w, http.StatusUnauthorized, errors.New("unauthorized"))
 	return false
+}
+
+type apiErrorMeta struct {
+	Message   string
+	Code      string
+	Retryable bool
+}
+
+func errorMetaForStatus(status int, err error) apiErrorMeta {
+	if err == nil {
+		err = errors.New(http.StatusText(status))
+	}
+	status = normalizeErrorStatus(status, err)
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		message = http.StatusText(status)
+	}
+
+	meta := apiErrorMeta{
+		Message: message,
+		Code:    "internal_error",
+	}
+
+	switch {
+	case status == http.StatusConflict && strings.HasPrefix(message, "session already exists:"):
+		meta.Code = "session_exists"
+	case status == http.StatusConflict && strings.Contains(message, "already in progress"):
+		meta.Code = "agent_in_progress"
+	case status == http.StatusBadRequest && strings.EqualFold(message, "MCP is not configured"):
+		meta.Code = "mcp_not_configured"
+	case status == http.StatusNotFound && errors.Is(err, os.ErrNotExist):
+		meta.Code = "session_not_found"
+	case status == http.StatusNotFound && strings.HasPrefix(message, "workflow not found:"):
+		meta.Code = "workflow_not_found"
+	case status == http.StatusNotFound && strings.HasPrefix(message, "agent not found"):
+		meta.Code = "agent_not_found"
+	case status == http.StatusUnauthorized:
+		meta.Code = "unauthorized"
+	case status == http.StatusMethodNotAllowed:
+		meta.Code = "method_not_allowed"
+	case status == http.StatusConflict:
+		meta.Code = "conflict"
+	case status == http.StatusRequestTimeout:
+		meta.Code = "timeout"
+		meta.Retryable = true
+	case errors.Is(err, context.Canceled):
+		meta.Code = "cancelled"
+		meta.Retryable = true
+	case status == http.StatusBadRequest && isInvalidJSONError(err):
+		meta.Code = "invalid_json"
+	case status == http.StatusBadRequest:
+		meta.Code = "invalid_request"
+	}
+
+	return meta
+}
+
+func normalizeErrorStatus(status int, err error) int {
+	if status != http.StatusInternalServerError || err == nil {
+		return status
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusRequestTimeout
+	case errors.Is(err, os.ErrNotExist):
+		return http.StatusNotFound
+	}
+
+	message := strings.TrimSpace(err.Error())
+	switch {
+	case strings.HasPrefix(message, "session already exists:"):
+		return http.StatusConflict
+	case strings.HasPrefix(message, "workflow not found:"),
+		strings.HasPrefix(message, "agent not found"):
+		return http.StatusNotFound
+	case strings.Contains(message, "already in progress"):
+		return http.StatusConflict
+	case strings.EqualFold(message, "MCP is not configured"),
+		strings.EqualFold(message, "prompt is empty"),
+		strings.EqualFold(message, "maximum agent depth reached"),
+		strings.EqualFold(message, "session is closed"):
+		return http.StatusBadRequest
+	default:
+		return status
+	}
+}
+
+func isInvalidJSONError(err error) bool {
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &syntaxErr) || errors.As(err, &typeErr)
+}
+
+func (m *managedSession) beginTurn(ctx context.Context) (context.Context, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+
+	m.lifecycleMu.Lock()
+	if m.closed {
+		m.lifecycleMu.Unlock()
+		cancel()
+		return nil, nil, errors.New("session is closed")
+	}
+	m.activeTurnCancel = cancel
+	m.lifecycleMu.Unlock()
+
+	release := func() {
+		m.lifecycleMu.Lock()
+		if m.activeTurnCancel != nil {
+			m.activeTurnCancel = nil
+		}
+		m.lifecycleMu.Unlock()
+		cancel()
+	}
+
+	return runCtx, release, nil
+}
+
+func (m *managedSession) markClosed() context.CancelFunc {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.closed {
+		return nil
+	}
+	m.closed = true
+	cancel := m.activeTurnCancel
+	m.activeTurnCancel = nil
+	return cancel
+}
+
+func (m *managedSession) isClosed() bool {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	return m.closed
+}
+
+func (m *managedSession) unsubscribeEvent(id int) {
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	subscriber, ok := m.subs[id]
+	if !ok {
+		return
+	}
+	delete(m.subs, id)
+	close(subscriber.ch)
+}
+
+func (m *managedSession) closeSubscriptions() {
+	m.subMu.Lock()
+	subscribers := m.subs
+	m.subs = make(map[int]*eventSubscriber)
+	m.subMu.Unlock()
+
+	for _, subscriber := range subscribers {
+		close(subscriber.ch)
+	}
 }
 
 func newSessionID() (string, error) {
