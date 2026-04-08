@@ -207,12 +207,13 @@ type agentTaskInput struct {
 type AgentFanoutTool struct{}
 
 type agentFanoutInput struct {
-	Tasks          []agentTaskInput `json:"tasks"`
-	Wait           bool             `json:"wait,omitempty"`
-	MaxParallel    int              `json:"max_parallel,omitempty"`
-	ResourceLimits map[string]int   `json:"resource_limits,omitempty"`
-	FailFast       bool             `json:"fail_fast,omitempty"`
-	TimeoutSeconds int              `json:"timeout_seconds,omitempty"`
+	Tasks                []agentTaskInput `json:"tasks"`
+	Wait                 bool             `json:"wait,omitempty"`
+	MaxParallel          int              `json:"max_parallel,omitempty"`
+	ResourceLimits       map[string]int   `json:"resource_limits,omitempty"`
+	FailFast             bool             `json:"fail_fast,omitempty"`
+	PreemptLowerPriority bool             `json:"preempt_lower_priority,omitempty"`
+	TimeoutSeconds       int              `json:"timeout_seconds,omitempty"`
 }
 
 func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
@@ -294,6 +295,10 @@ func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
 					"type":        "boolean",
 					"description": "Cancel active workflow tasks and skip pending ones when any task fails. Only applies when wait=true.",
 				},
+				"preempt_lower_priority": map[string]any{
+					"type":        "boolean",
+					"description": "Allow higher-priority workflow tasks to preempt already running lower-priority tasks when blocked by workflow limits.",
+				},
 				"timeout_seconds": map[string]any{
 					"type":        "integer",
 					"description": "Optional timeout for the whole batch wait.",
@@ -324,7 +329,7 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 	if hasDependencies && !args.Wait {
 		return engine.ToolResult{}, fmt.Errorf("depends_on requires wait=true so xxx-code can orchestrate the workflow")
 	}
-	workflowMode := hasDependencies || args.MaxParallel > 0 || len(resourceLimits) > 0 || args.FailFast || hasFanoutTaskExecutionControls(plan)
+	workflowMode := hasDependencies || args.MaxParallel > 0 || len(resourceLimits) > 0 || args.FailFast || args.PreemptLowerPriority || hasFanoutTaskExecutionControls(plan)
 	if workflowMode && !args.Wait {
 		return engine.ToolResult{}, fmt.Errorf("workflow controls require wait=true")
 	}
@@ -337,9 +342,10 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 		}
 
 		results, snapshots, err := executeFanoutPlan(waitCtx, execCtx, plan, fanoutExecutionOptions{
-			maxParallel:    args.MaxParallel,
-			resourceLimits: resourceLimits,
-			failFast:       args.FailFast,
+			maxParallel:          args.MaxParallel,
+			resourceLimits:       resourceLimits,
+			failFast:             args.FailFast,
+			preemptLowerPriority: args.PreemptLowerPriority,
 		})
 		if err != nil {
 			return engine.ToolResult{}, err
@@ -579,6 +585,7 @@ type fanoutTaskResult struct {
 	Priority       int      `json:"priority,omitempty"`
 	Retries        int      `json:"retries,omitempty"`
 	Attempts       int      `json:"attempts,omitempty"`
+	Preemptions    int      `json:"preemptions,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 	AgentID        string   `json:"agent_id,omitempty"`
 	Status         string   `json:"status"`
@@ -587,18 +594,20 @@ type fanoutTaskResult struct {
 }
 
 type plannedFanoutTask struct {
-	index      int
-	task       agentTaskInput
-	key        string
-	dependsOn  []string
-	depIndexes []int
-	promptRefs []fanoutPromptReference
-	started    bool
-	done       bool
-	attempts   int
-	agentID    string
-	snapshot   *engine.AgentSnapshot
-	result     fanoutTaskResult
+	index            int
+	task             agentTaskInput
+	key              string
+	dependsOn        []string
+	depIndexes       []int
+	promptRefs       []fanoutPromptReference
+	started          bool
+	done             bool
+	attempts         int
+	preemptions      int
+	preemptRequested bool
+	agentID          string
+	snapshot         *engine.AgentSnapshot
+	result           fanoutTaskResult
 }
 
 type fanoutWaitResult struct {
@@ -611,9 +620,10 @@ type fanoutWaitResult struct {
 }
 
 type fanoutExecutionOptions struct {
-	maxParallel    int
-	resourceLimits map[string]int
-	failFast       bool
+	maxParallel          int
+	resourceLimits       map[string]int
+	failFast             bool
+	preemptLowerPriority bool
 }
 
 type fanoutPromptReference struct {
@@ -737,13 +747,13 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 		markPendingFanoutTasksSkipped(plan, fmt.Sprintf("skipped because fail_fast triggered by task %s with status %s", taskName, status))
 	}
 
-	launchReady := func() error {
+	launchReady := func(skipIndexes map[int]struct{}) error {
 		if failFastTriggered {
 			return nil
 		}
 		for _, item := range plan {
-			if options.maxParallel > 0 && len(active) >= options.maxParallel {
-				return nil
+			if _, skip := skipIndexes[item.index]; skip {
+				continue
 			}
 			if item.started || item.done {
 				continue
@@ -758,7 +768,12 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			if !dependenciesSatisfied(item, plan) {
 				continue
 			}
-			if !resourceAvailable(item, activeResources, options.resourceLimits) {
+			if blocked := fanoutTaskBlocked(item, active, activeResources, options.resourceLimits, options); blocked != "" {
+				if options.preemptLowerPriority {
+					if victim := findPreemptibleFanoutTask(plan, active, item, blocked); victim != nil {
+						requestFanoutPreemption(execCtx, victim)
+					}
+				}
 				continue
 			}
 			prompt, err := renderFanoutPrompt(item, plan)
@@ -813,13 +828,13 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 		return nil
 	}
 
-	if err := launchReady(); err != nil {
+	if err := launchReady(nil); err != nil {
 		return nil, nil, err
 	}
 
 	for completedCount(plan) < len(plan) {
 		if len(active) == 0 {
-			if err := launchReady(); err != nil {
+			if err := launchReady(nil); err != nil {
 				return nil, nil, err
 			}
 			if len(active) == 0 {
@@ -850,6 +865,14 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			current.snapshot = &item.snapshot
 			current.result.AgentID = item.snapshot.ID
 			current.result.Attempts = item.attempt
+			if current.preemptRequested && !item.timedOut && item.snapshot.Status == engine.AgentCancelled {
+				resetFanoutTaskAfterPreemption(current)
+				if err := launchReady(map[int]struct{}{current.index: struct{}{}}); err != nil {
+					cancelFanoutAgents(execCtx, active)
+					return nil, nil, err
+				}
+				continue
+			}
 			if item.timedOut {
 				current.result.Status = "timed_out"
 				current.result.Result = ""
@@ -865,7 +888,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 				triggerFailFast(current.key, current.result.Status)
 			}
 
-			if err := launchReady(); err != nil {
+			if err := launchReady(nil); err != nil {
 				cancelFanoutAgents(execCtx, active)
 				return nil, nil, err
 			}
@@ -961,6 +984,23 @@ func resetFanoutTaskForRetry(item *plannedFanoutTask) {
 	item.result.Error = ""
 }
 
+func resetFanoutTaskAfterPreemption(item *plannedFanoutTask) {
+	if item == nil {
+		return
+	}
+	item.started = false
+	item.done = false
+	item.preemptRequested = false
+	item.agentID = ""
+	item.snapshot = nil
+	item.preemptions++
+	item.result.Preemptions = item.preemptions
+	item.result.AgentID = ""
+	item.result.Status = ""
+	item.result.Result = ""
+	item.result.Error = ""
+}
+
 func hasFanoutTaskErrors(results []fanoutTaskResult) bool {
 	for _, item := range results {
 		if item.Status != string(engine.AgentIdle) {
@@ -1020,6 +1060,16 @@ func resourceAvailable(item *plannedFanoutTask, activeResources, resourceLimits 
 	return activeResources[resource] < limit
 }
 
+func fanoutTaskBlocked(item *plannedFanoutTask, active map[string]int, activeResources, resourceLimits map[string]int, options fanoutExecutionOptions) string {
+	if !resourceAvailable(item, activeResources, resourceLimits) {
+		return "resource"
+	}
+	if options.maxParallel > 0 && len(active) >= options.maxParallel {
+		return "global"
+	}
+	return ""
+}
+
 func incrementFanoutResource(activeResources map[string]int, resource string) {
 	resource = normalizeFanoutResource(resource)
 	if resource == "" {
@@ -1038,6 +1088,39 @@ func decrementFanoutResource(activeResources map[string]int, resource string) {
 		return
 	}
 	activeResources[resource]--
+}
+
+func findPreemptibleFanoutTask(plan []*plannedFanoutTask, active map[string]int, candidate *plannedFanoutTask, blocked string) *plannedFanoutTask {
+	var victim *plannedFanoutTask
+	candidateResource := normalizeFanoutResource(candidate.task.Resource)
+
+	for agentID, index := range active {
+		_ = agentID
+		current := plan[index]
+		if current == nil || current.preemptRequested {
+			continue
+		}
+		if current.task.Priority >= candidate.task.Priority {
+			continue
+		}
+		if blocked == "resource" && normalizeFanoutResource(current.task.Resource) != candidateResource {
+			continue
+		}
+		if victim == nil || current.task.Priority < victim.task.Priority || (current.task.Priority == victim.task.Priority && current.attempts < victim.attempts) {
+			victim = current
+		}
+	}
+	return victim
+}
+
+func requestFanoutPreemption(execCtx *engine.ExecutionContext, task *plannedFanoutTask) {
+	if task == nil || task.preemptRequested || strings.TrimSpace(task.agentID) == "" {
+		return
+	}
+	task.preemptRequested = true
+	go func(agentID string) {
+		_, _ = execCtx.Runner.CancelAgent(context.Background(), agentID, true)
+	}(task.agentID)
 }
 
 func waitForFanoutTask(ctx context.Context, execCtx *engine.ExecutionContext, agentID string, timeoutSeconds int) (engine.AgentSnapshot, bool, error) {

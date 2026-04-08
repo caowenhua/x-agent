@@ -149,6 +149,7 @@ type fanoutTaskPayload struct {
 	Resource       string   `json:"resource"`
 	Retries        int      `json:"retries"`
 	Attempts       int      `json:"attempts"`
+	Preemptions    int      `json:"preemptions"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
 	AgentID        string   `json:"agent_id"`
 	Result         string   `json:"result"`
@@ -1040,6 +1041,176 @@ func TestAgentFanoutToolRejectsInvalidResourceLimits(t *testing.T) {
 	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
 	if err == nil || !strings.Contains(err.Error(), "must be greater than 0") {
 		t.Fatalf("expected invalid resource limit error, got %v", err)
+	}
+}
+
+func TestAgentFanoutToolPreemptsLowerPriorityTaskForGlobalSlot(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 3,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	resultCh := make(chan engine.ToolResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait":                   true,
+			"max_parallel":           2,
+			"preempt_lower_priority": true,
+			"tasks": []map[string]any{
+				{"name": "low_one", "prompt": "low one", "priority": 1},
+				{"name": "low_two", "prompt": "low two", "priority": 2},
+				{"name": "high", "prompt": "high work", "priority": 10},
+			},
+		})
+		result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	lowOneStarted := provider.startedChan("low one")
+	lowTwoStarted := provider.startedChan("low two")
+	highStarted := provider.startedChan("high work")
+
+	select {
+	case <-lowTwoStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("low_two task did not start")
+	}
+
+	select {
+	case <-highStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("high task did not preempt lower-priority work")
+	}
+
+	close(provider.releaseChan("high work"))
+	close(provider.releaseChan("low two"))
+
+	select {
+	case <-lowOneStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("low_one task did not restart after preemption")
+	}
+	close(provider.releaseChan("low one"))
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case result := <-resultCh:
+		if result.IsError {
+			t.Fatalf("expected successful preemptive workflow, got %s", result.Content)
+		}
+		var payload fanoutResponse
+		if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+			t.Fatal(err)
+		}
+		byName := mapFanoutTasks(payload.Tasks)
+		if byName["low_one"].Preemptions != 1 {
+			t.Fatalf("expected one preemption, got %+v", byName["low_one"])
+		}
+		if byName["low_one"].Attempts < 1 {
+			t.Fatalf("expected low_one task to run after preemption, got %+v", byName["low_one"])
+		}
+	}
+}
+
+func TestAgentFanoutToolPreemptsWithinSameResourcePool(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 4,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	resultCh := make(chan engine.ToolResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait":                   true,
+			"resource_limits":        map[string]int{"browser": 1},
+			"preempt_lower_priority": true,
+			"tasks": []map[string]any{
+				{"name": "browser_low", "prompt": "browser low", "resource": "browser", "priority": 1},
+				{"name": "cpu_task", "prompt": "cpu task", "resource": "cpu", "priority": 2},
+				{"name": "browser_high", "prompt": "browser high", "resource": "browser", "priority": 10},
+			},
+		})
+		result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	browserLowStarted := provider.startedChan("browser low")
+	cpuStarted := provider.startedChan("cpu task")
+	browserHighStarted := provider.startedChan("browser high")
+
+	select {
+	case <-cpuStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cpu task did not start")
+	}
+
+	select {
+	case <-browserHighStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("browser high did not preempt the browser resource")
+	}
+
+	close(provider.releaseChan("browser high"))
+	close(provider.releaseChan("cpu task"))
+
+	select {
+	case <-browserLowStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("browser low did not restart after browser high completed")
+	}
+	close(provider.releaseChan("browser low"))
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case result := <-resultCh:
+		if result.IsError {
+			t.Fatalf("expected successful resource preemption workflow, got %s", result.Content)
+		}
+		var payload fanoutResponse
+		if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+			t.Fatal(err)
+		}
+		byName := mapFanoutTasks(payload.Tasks)
+		if byName["browser_low"].Preemptions != 1 {
+			t.Fatalf("expected browser_low to be preempted once, got %+v", byName["browser_low"])
+		}
+		if byName["cpu_task"].Preemptions != 0 {
+			t.Fatalf("expected cpu task to avoid browser preemption, got %+v", byName["cpu_task"])
+		}
 	}
 }
 
