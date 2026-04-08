@@ -83,6 +83,34 @@ func TestRunnerExecutesToolLoop(t *testing.T) {
 	}
 }
 
+func TestRunnerBlocksToolOutsideAllowedList(t *testing.T) {
+	tool := &countingTool{}
+	provider := &stubProvider{}
+	runner := NewRunner(provider, NewRegistry(tool), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     4,
+		PermissionPolicy: PermissionPolicy{
+			AllowedTools: []string{"different_tool"},
+		},
+	})
+	session := NewSession()
+
+	result, err := runner.RunTurn(context.Background(), session, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalText != "final answer" {
+		t.Fatalf("unexpected final text: %q", result.FinalText)
+	}
+	if tool.calls != 0 {
+		t.Fatalf("expected blocked tool to avoid execution, got %d calls", tool.calls)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("expected 2 provider calls, got %d", provider.calls)
+	}
+}
+
 type promptProvider struct{}
 
 func (p *promptProvider) CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {

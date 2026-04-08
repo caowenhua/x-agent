@@ -78,10 +78,14 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		MaxAgentDepth:       3,
 		MaxParallelAgents:   cfg.MaxParallelAgents,
 		PermissionPolicy: engine.PermissionPolicy{
-			ReadRoots:   cfg.ReadRoots,
-			WriteRoots:  cfg.WriteRoots,
-			ReadOnly:    cfg.ReadOnly,
-			BashEnabled: cfg.BashEnabled,
+			ReadRoots:           cfg.ReadRoots,
+			WriteRoots:          cfg.WriteRoots,
+			AllowedTools:        cfg.AllowedTools,
+			BlockedTools:        cfg.BlockedTools,
+			BashAllowedPrefixes: cfg.BashAllowPrefixes,
+			BashBlockedPrefixes: cfg.BashDenyPrefixes,
+			ReadOnly:            cfg.ReadOnly,
+			BashEnabled:         cfg.BashEnabled,
 		},
 		Hooks: hooks.NewScriptManager(hooks.Config{
 			BeforeTool: cfg.HookBeforeTool,

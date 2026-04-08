@@ -40,6 +40,9 @@ func (t *GlobTool) Definition() engine.ToolDefinition {
 }
 
 func (t *GlobTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	if err := ensureToolAllowed(execCtx, t.Definition().Name); err != nil {
+		return engine.ToolResult{}, err
+	}
 	var args globInput
 	if err := json.Unmarshal(input, &args); err != nil {
 		return engine.ToolResult{}, err

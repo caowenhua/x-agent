@@ -122,3 +122,68 @@ func TestReadFileToolRejectsOutsideReadRoots(t *testing.T) {
 		t.Fatalf("expected read root policy error, got %v", err)
 	}
 }
+
+func TestWriteFileToolRejectsBlockedTool(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(nil, engine.NewRegistry(), engine.RunnerConfig{
+		WorkingDir: dir,
+		PermissionPolicy: engine.PermissionPolicy{
+			ReadRoots:    []string{dir},
+			WriteRoots:   []string{dir},
+			BlockedTools: []string{"write_file"},
+			BashEnabled:  true,
+		},
+	})
+
+	input, _ := json.Marshal(map[string]any{
+		"path":    "demo.txt",
+		"content": "hello",
+	})
+
+	_, err := (&WriteFileTool{}).Call(context.Background(), &engine.ExecutionContext{
+		Runner:     runner,
+		WorkingDir: dir,
+	}, input)
+	if err == nil || !strings.Contains(err.Error(), "blocked by policy") {
+		t.Fatalf("expected blocked tool policy error, got %v", err)
+	}
+}
+
+func TestBashToolRejectsDisallowedCommandPrefix(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(nil, engine.NewRegistry(), engine.RunnerConfig{
+		WorkingDir: dir,
+		PermissionPolicy: engine.PermissionPolicy{
+			ReadRoots:           []string{dir},
+			WriteRoots:          []string{dir},
+			BashEnabled:         true,
+			BashAllowedPrefixes: []string{"go env", "go test"},
+			BashBlockedPrefixes: []string{"rm ", "sudo "},
+		},
+	})
+
+	input, _ := json.Marshal(map[string]any{
+		"command": "rm -rf /tmp/demo",
+	})
+	_, err := (&BashTool{}).Call(context.Background(), &engine.ExecutionContext{
+		Runner:     runner,
+		WorkingDir: dir,
+	}, input)
+	if err == nil || !strings.Contains(err.Error(), "blocked by policy") {
+		t.Fatalf("expected blocked bash prefix error, got %v", err)
+	}
+
+	input, _ = json.Marshal(map[string]any{
+		"command": "go env GOROOT",
+	})
+	result, err := (&BashTool{}).Call(context.Background(), &engine.ExecutionContext{
+		Runner:     runner,
+		WorkingDir: dir,
+	}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected allowed bash command to run, got %s", result.Content)
+	}
+}

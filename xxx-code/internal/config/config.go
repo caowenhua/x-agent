@@ -38,6 +38,10 @@ type Config struct {
 	MCPConfigFile     string
 	ReadRoots         []string
 	WriteRoots        []string
+	AllowedTools      []string
+	BlockedTools      []string
+	BashAllowPrefixes []string
+	BashDenyPrefixes  []string
 	ReadOnly          bool
 	BashEnabled       bool
 	HookBeforeTool    string
@@ -80,6 +84,10 @@ func Load() (Config, error) {
 	mcpConfigFlag := flag.String("mcp-config", strings.TrimSpace(os.Getenv("XXX_CODE_MCP_CONFIG")), "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
 	readRootsFlag := flag.String("allow-read", "", "Comma-separated read roots; the working directory is always included")
 	writeRootsFlag := flag.String("allow-write", "", "Comma-separated write roots; the working directory is always included unless --read-only is set")
+	allowToolsFlag := flag.String("allow-tools", "", "Comma-separated tool allowlist; when set, only these tools may run")
+	denyToolsFlag := flag.String("deny-tools", "", "Comma-separated tool denylist")
+	allowBashPrefixFlag := flag.String("allow-bash-prefix", "", "Comma-separated allowed bash command prefixes")
+	denyBashPrefixFlag := flag.String("deny-bash-prefix", "", "Comma-separated blocked bash command prefixes")
 	hookBeforeToolFlag := flag.String("hook-before-tool", "", "Shell command to run before each tool call; non-zero exit blocks the tool")
 	hookAfterToolFlag := flag.String("hook-after-tool", "", "Shell command to run after each tool call")
 	hookAfterTurnFlag := flag.String("hook-after-turn", "", "Shell command to run after each turn")
@@ -119,6 +127,10 @@ func Load() (Config, error) {
 
 	cfg.ReadRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *readRootsFlag)...)
 	cfg.WriteRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *writeRootsFlag)...)
+	cfg.AllowedTools = parseCSV(*allowToolsFlag)
+	cfg.BlockedTools = parseCSV(*denyToolsFlag)
+	cfg.BashAllowPrefixes = parseCSV(*allowBashPrefixFlag)
+	cfg.BashDenyPrefixes = parseCSV(*denyBashPrefixFlag)
 	cfg.HookBeforeTool = strings.TrimSpace(*hookBeforeToolFlag)
 	cfg.HookAfterTool = strings.TrimSpace(*hookAfterToolFlag)
 	cfg.HookAfterTurn = strings.TrimSpace(*hookAfterTurnFlag)
@@ -172,4 +184,17 @@ func parseRoots(base, raw string) []string {
 		roots = append(roots, path)
 	}
 	return roots
+}
+
+func parseCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		values = append(values, part)
+	}
+	return values
 }

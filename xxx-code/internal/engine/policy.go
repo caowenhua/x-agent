@@ -7,10 +7,14 @@ import (
 )
 
 type PermissionPolicy struct {
-	ReadRoots   []string
-	WriteRoots  []string
-	ReadOnly    bool
-	BashEnabled bool
+	ReadRoots           []string
+	WriteRoots          []string
+	AllowedTools        []string
+	BlockedTools        []string
+	BashAllowedPrefixes []string
+	BashBlockedPrefixes []string
+	ReadOnly            bool
+	BashEnabled         bool
 }
 
 func (r *Runner) EnsureReadPath(path string) error {
@@ -25,11 +29,41 @@ func (r *Runner) EnsureBash(command string) error {
 	if r == nil {
 		return nil
 	}
-	if !r.config.PermissionPolicy.BashEnabled {
+	policy := r.PermissionPolicy()
+	if !policy.BashEnabled {
 		return fmt.Errorf("bash tool is disabled by policy")
 	}
 	if strings.TrimSpace(command) == "" {
 		return fmt.Errorf("command is required")
+	}
+	if err := r.EnsureTool("bash"); err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(command)
+	if matchesAnyPrefix(trimmed, policy.BashBlockedPrefixes) {
+		return fmt.Errorf("bash command %q is blocked by policy", trimmed)
+	}
+	if len(policy.BashAllowedPrefixes) > 0 && !matchesAnyPrefix(trimmed, policy.BashAllowedPrefixes) {
+		return fmt.Errorf("bash command %q does not match any allowed command prefix", trimmed)
+	}
+	return nil
+}
+
+func (r *Runner) EnsureTool(name string) error {
+	if r == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("tool name is required")
+	}
+
+	policy := r.PermissionPolicy()
+	if containsValue(policy.BlockedTools, name) {
+		return fmt.Errorf("tool %s is blocked by policy", name)
+	}
+	if len(policy.AllowedTools) > 0 && !containsValue(policy.AllowedTools, name) {
+		return fmt.Errorf("tool %s is not in the allowed tool list", name)
 	}
 	return nil
 }
@@ -38,6 +72,10 @@ func (r *Runner) PermissionPolicy() PermissionPolicy {
 	policy := r.config.PermissionPolicy
 	policy.ReadRoots = normalizeRoots(policy.ReadRoots)
 	policy.WriteRoots = normalizeRoots(policy.WriteRoots)
+	policy.AllowedTools = normalizeValues(policy.AllowedTools)
+	policy.BlockedTools = normalizeValues(policy.BlockedTools)
+	policy.BashAllowedPrefixes = normalizeValues(policy.BashAllowedPrefixes)
+	policy.BashBlockedPrefixes = normalizeValues(policy.BashBlockedPrefixes)
 	return policy
 }
 
@@ -115,6 +153,41 @@ func pathWithinAnyRoot(target string, roots []string) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+func normalizeValues(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized
+}
+
+func containsValue(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAnyPrefix(value string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
 	}
 	return false
 }

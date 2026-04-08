@@ -179,6 +179,8 @@ go run ./cmd/xxx-code \
 - `write_file` / `edit_file` 只允许写入工作目录及显式允许的 write roots
 - `bash` 可以整体关闭
 - `--read-only` 会直接禁止写文件类工具
+- 可以按 tool 名做 allowlist / denylist
+- `bash` 还可以继续细化到命令前缀 allow / deny
 
 常见用法：
 
@@ -195,6 +197,18 @@ go run ./cmd/xxx-code \
 go run ./cmd/xxx-code \
   --allow-write ./generated,./reports
 ```
+
+或者把权限直接收得更细：
+
+```bash
+go run ./cmd/xxx-code \
+  --allow-tools read_file,glob,grep,bash \
+  --deny-tools mcp__playwright__navigate \
+  --allow-bash-prefix "git status,go test,go list" \
+  --deny-bash-prefix "rm ,sudo "
+```
+
+这里的 `--allow-tools` / `--deny-tools` 既可以控内建 tool，也可以控动态 MCP tool；`bash` 的前缀策略则适合把“允许哪些命令族”收得更死。
 
 REPL 里可以用 `:policy` 查看当前生效策略。
 
@@ -392,6 +406,8 @@ go run ./cmd/xxx-code \
   --mcp-config /path/to/project/.mcp.json \
   --allow-read ../shared-docs \
   --allow-write ./generated \
+  --allow-tools read_file,glob,grep,bash \
+  --allow-bash-prefix "git status,go test" \
   --resume \
   --session-file /path/to/project/.xxx-code/session.json \
   --print "实现一个功能"
@@ -449,7 +465,6 @@ go test ./...
 这一版仍然刻意没有覆盖 TypeScript 版里特别重的产品层：
 
 - 更完整的流式 TUI / 富交互界面
-- 更细粒度的权限系统
 - remote agent / bridge / daemon
 
 但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。

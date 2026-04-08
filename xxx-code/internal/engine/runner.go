@@ -211,6 +211,32 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 				Text:      formatToolInput(toolBlock.Input),
 			})
 
+			if err := r.EnsureTool(toolBlock.Name); err != nil {
+				result := ToolResult{
+					Content: "tool blocked by policy: " + err.Error(),
+					IsError: true,
+				}
+				r.emit(Event{
+					Kind:      EventToolResult,
+					AgentID:   exec.AgentID,
+					AgentName: exec.AgentName,
+					ToolName:  toolBlock.Name,
+					Text:      result.Content,
+				})
+				exec.Session.Append(Message{
+					Role: RoleUser,
+					Content: []Block{
+						{
+							Type:      BlockToolResult,
+							ToolUseID: toolBlock.ID,
+							Result:    result.Content,
+							IsError:   true,
+						},
+					},
+				})
+				continue
+			}
+
 			if err := r.beforeToolHook(ctx, exec, toolBlock.Name, toolBlock.Input); err != nil {
 				result := ToolResult{
 					Content: "tool blocked by before_tool hook: " + err.Error(),

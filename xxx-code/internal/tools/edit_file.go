@@ -50,6 +50,9 @@ func (t *EditFileTool) Definition() engine.ToolDefinition {
 
 func (t *EditFileTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
 	_ = ctx
+	if err := ensureToolAllowed(execCtx, t.Definition().Name); err != nil {
+		return engine.ToolResult{}, err
+	}
 	var args editFileInput
 	if err := json.Unmarshal(input, &args); err != nil {
 		return engine.ToolResult{}, err

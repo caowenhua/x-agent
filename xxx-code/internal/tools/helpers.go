@@ -52,3 +52,10 @@ func ensureWriteAllowed(execCtx *engine.ExecutionContext, path string) error {
 	}
 	return execCtx.EnsureWritePath(path)
 }
+
+func ensureToolAllowed(execCtx *engine.ExecutionContext, name string) error {
+	if execCtx == nil || execCtx.Runner == nil {
+		return nil
+	}
+	return execCtx.Runner.EnsureTool(name)
+}
