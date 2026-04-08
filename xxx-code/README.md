@@ -155,6 +155,14 @@ go run ./cmd/xxx-code \
 - `GET /v1/sessions/{id}`
 - `GET /v1/sessions/{id}/messages?limit=20`
 - `POST /v1/sessions/{id}/turns`
+- `GET /v1/sessions/{id}/policy`
+- `GET /v1/sessions/{id}/hooks`
+- `GET /v1/sessions/{id}/mcp`
+- `GET /v1/sessions/{id}/mcp/resources?server=name`
+- `GET /v1/sessions/{id}/mcp/resource-templates?server=name`
+- `GET /v1/sessions/{id}/mcp/prompts?server=name`
+- `POST /v1/sessions/{id}/mcp/read-resource`
+- `POST /v1/sessions/{id}/mcp/get-prompt`
 - `GET /v1/sessions/{id}/agents`
 - `POST /v1/sessions/{id}/agents/{agent_id}/send`
 - `POST /v1/sessions/{id}/agents/{agent_id}/cancel`
@@ -211,6 +219,14 @@ go run ./cmd/xxx-code \
 - `:help`
 - `:session`
 - `:history [n]`
+- `:mcp`
+- `:mcp-resources [server]`
+- `:mcp-resource-templates [server]`
+- `:mcp-prompts [server]`
+- `:mcp-read <server> <uri>`
+- `:mcp-prompt <server> <name> [key=value ...]`
+- `:policy`
+- `:hooks`
 - `:agents`
 - `:wait <agent-id>`
 - `:send <agent-id> <prompt>`

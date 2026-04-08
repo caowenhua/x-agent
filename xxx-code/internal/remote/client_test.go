@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"path/filepath"
@@ -101,6 +102,52 @@ func TestClientEnsureNamedSession(t *testing.T) {
 	}
 }
 
+func TestClientCanInspectPolicyHooksAndMCPStatus(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	session, err := client.EnsureSession(context.Background(), "inspect-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := client.GetPolicy(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.BashEnabled {
+		t.Fatalf("expected bash to be enabled in policy: %+v", policy)
+	}
+	if len(policy.ReadRoots) != 1 || policy.ReadRoots[0] == "" {
+		t.Fatalf("unexpected read roots: %+v", policy)
+	}
+
+	hooks, err := client.GetHooks(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hooks.BeforeTool != "echo before" || hooks.Timeout != time.Second.String() {
+		t.Fatalf("unexpected hook config: %+v", hooks)
+	}
+
+	mcpSummary, err := client.GetMCP(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mcpSummary.ServerCount != 0 || mcpSummary.ToolCount != 0 || len(mcpSummary.Statuses) != 0 {
+		t.Fatalf("expected empty MCP summary, got %+v", mcpSummary)
+	}
+
+	_, err = client.ListMCPResources(context.Background(), session.ID, "")
+	if err == nil {
+		t.Fatal("expected MCP resources call to fail without MCP config")
+	}
+	var remoteErr *Error
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != 400 {
+		t.Fatalf("expected 400 remote error, got %v", err)
+	}
+}
+
 func newTestClient(t *testing.T) (*Client, func()) {
 	t.Helper()
 	cfg := newTestConfig(t)
@@ -130,6 +177,10 @@ func newTestConfig(t *testing.T) config.Config {
 		DaemonDir:         filepath.Join(dir, ".xxx-code", "daemon"),
 		ToolTimeout:       2 * time.Second,
 		HookTimeout:       time.Second,
+		HookBeforeTool:    "echo before",
+		HookAfterTool:     "echo after",
+		HookAfterTurn:     "echo turn",
+		HookAgentEvent:    "echo agent",
 		ReadRoots:         []string{dir},
 		WriteRoots:        []string{dir},
 		BashEnabled:       true,

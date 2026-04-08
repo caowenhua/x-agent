@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
 
@@ -55,6 +56,21 @@ type WorkflowResumeResult struct {
 	Workflow tools.WorkflowSnapshot        `json:"workflow"`
 	Tasks    []tools.FanoutTaskResultAlias `json:"tasks"`
 	Agents   []engine.AgentSnapshot        `json:"agents"`
+}
+
+type MCPSummary struct {
+	ConfigPath  string                    `json:"config_path,omitempty"`
+	ServerCount int                       `json:"server_count"`
+	ToolCount   int                       `json:"tool_count"`
+	Statuses    []mcpruntime.ServerStatus `json:"statuses"`
+}
+
+type HookConfig struct {
+	BeforeTool string `json:"before_tool,omitempty"`
+	AfterTool  string `json:"after_tool,omitempty"`
+	AfterTurn  string `json:"after_turn,omitempty"`
+	AgentEvent string `json:"agent_event,omitempty"`
+	Timeout    string `json:"timeout,omitempty"`
 }
 
 func NewClient(baseURL string, httpClient *http.Client) *Client {
@@ -177,6 +193,97 @@ func (c *Client) SaveSession(ctx context.Context, sessionID string) (SessionSumm
 		return SessionSummary{}, err
 	}
 	return response.Session, nil
+}
+
+func (c *Client) GetPolicy(ctx context.Context, sessionID string) (engine.PermissionPolicy, error) {
+	var response struct {
+		Policy engine.PermissionPolicy `json:"policy"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/policy", nil, &response); err != nil {
+		return engine.PermissionPolicy{}, err
+	}
+	return response.Policy, nil
+}
+
+func (c *Client) GetHooks(ctx context.Context, sessionID string) (HookConfig, error) {
+	var response struct {
+		Hooks HookConfig `json:"hooks"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/hooks", nil, &response); err != nil {
+		return HookConfig{}, err
+	}
+	return response.Hooks, nil
+}
+
+func (c *Client) GetMCP(ctx context.Context, sessionID string) (MCPSummary, error) {
+	var response struct {
+		MCP MCPSummary `json:"mcp"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp", nil, &response); err != nil {
+		return MCPSummary{}, err
+	}
+	return response.MCP, nil
+}
+
+func (c *Client) ListMCPResources(ctx context.Context, sessionID, serverName string) ([]mcpruntime.Resource, error) {
+	var response struct {
+		Resources []mcpruntime.Resource `json:"resources"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, withServerQuery("/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/resources", serverName), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Resources, nil
+}
+
+func (c *Client) ListMCPResourceTemplates(ctx context.Context, sessionID, serverName string) ([]mcpruntime.ResourceTemplate, error) {
+	var response struct {
+		ResourceTemplates []mcpruntime.ResourceTemplate `json:"resource_templates"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, withServerQuery("/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/resource-templates", serverName), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.ResourceTemplates, nil
+}
+
+func (c *Client) ListMCPPrompts(ctx context.Context, sessionID, serverName string) ([]mcpruntime.Prompt, error) {
+	var response struct {
+		Prompts []mcpruntime.Prompt `json:"prompts"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, withServerQuery("/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/prompts", serverName), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Prompts, nil
+}
+
+func (c *Client) ReadMCPResource(ctx context.Context, sessionID, serverName, resourceURI string) (mcpruntime.ResourceDetails, error) {
+	var response struct {
+		Resource mcpruntime.ResourceDetails `json:"resource"`
+	}
+	payload := map[string]any{
+		"server": strings.TrimSpace(serverName),
+		"uri":    strings.TrimSpace(resourceURI),
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/read-resource", payload, &response); err != nil {
+		return mcpruntime.ResourceDetails{}, err
+	}
+	return response.Resource, nil
+}
+
+func (c *Client) GetMCPPrompt(ctx context.Context, sessionID, serverName, promptName string, arguments map[string]string) (mcpruntime.PromptDetails, error) {
+	var response struct {
+		Prompt mcpruntime.PromptDetails `json:"prompt"`
+	}
+	payload := map[string]any{
+		"server": strings.TrimSpace(serverName),
+		"name":   strings.TrimSpace(promptName),
+	}
+	if len(arguments) > 0 {
+		payload["arguments"] = arguments
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/get-prompt", payload, &response); err != nil {
+		return mcpruntime.PromptDetails{}, err
+	}
+	return response.Prompt, nil
 }
 
 func (c *Client) ListAgents(ctx context.Context, sessionID string) ([]engine.AgentSnapshot, error) {
@@ -318,4 +425,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody an
 		return nil
 	}
 	return json.Unmarshal(data, responseBody)
+}
+
+func withServerQuery(path, serverName string) string {
+	serverName = strings.TrimSpace(serverName)
+	if serverName == "" {
+		return path
+	}
+	values := url.Values{}
+	values.Set("server", serverName)
+	return path + "?" + values.Encode()
 }

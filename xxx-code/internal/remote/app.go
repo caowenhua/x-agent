@@ -132,6 +132,14 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":quit                     exit the remote REPL")
 		fmt.Fprintln(a.out, ":session                  print remote session summary")
 		fmt.Fprintln(a.out, ":history [n]              print the latest n remote messages (default 10)")
+		fmt.Fprintln(a.out, ":mcp                      print remote MCP status")
+		fmt.Fprintln(a.out, ":mcp-resources [server]   list remote MCP resources")
+		fmt.Fprintln(a.out, ":mcp-resource-templates [server] list remote MCP resource templates")
+		fmt.Fprintln(a.out, ":mcp-prompts [server]     list remote MCP prompts")
+		fmt.Fprintln(a.out, ":mcp-read <server> <uri>  read one remote MCP resource")
+		fmt.Fprintln(a.out, ":mcp-prompt <server> <name> [k=v ...] fetch one remote MCP prompt")
+		fmt.Fprintln(a.out, ":policy                   print remote permission policy")
+		fmt.Fprintln(a.out, ":hooks                    print remote hook configuration")
 		fmt.Fprintln(a.out, ":agents                   list remote agents")
 		fmt.Fprintln(a.out, ":wait <agent-id>          wait for a remote agent")
 		fmt.Fprintln(a.out, ":send <agent-id> <prompt> continue an existing remote agent")
@@ -157,6 +165,63 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		}
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
 			return a.client.ListMessages(ctx, a.sessionID, limit)
+		})
+	case ":mcp":
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.GetMCP(ctx, a.sessionID)
+		})
+	case ":mcp-resources":
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ListMCPResources(ctx, a.sessionID, server)
+		})
+	case ":mcp-resource-templates":
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ListMCPResourceTemplates(ctx, a.sessionID, server)
+		})
+	case ":mcp-prompts":
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ListMCPPrompts(ctx, a.sessionID, server)
+		})
+	case ":mcp-read":
+		if len(fields) < 3 {
+			fmt.Fprintln(a.errOut, "usage: :mcp-read <server> <uri>")
+			return false, nil
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ReadMCPResource(ctx, a.sessionID, fields[1], fields[2])
+		})
+	case ":mcp-prompt":
+		if len(fields) < 3 {
+			fmt.Fprintln(a.errOut, "usage: :mcp-prompt <server> <name> [key=value ...]")
+			return false, nil
+		}
+		arguments, err := parsePromptArguments(fields[3:])
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.GetMCPPrompt(ctx, a.sessionID, fields[1], fields[2], arguments)
+		})
+	case ":policy":
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.GetPolicy(ctx, a.sessionID)
+		})
+	case ":hooks":
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.GetHooks(ctx, a.sessionID)
 		})
 	case ":agents":
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
@@ -232,4 +297,20 @@ func (a *App) printJSON(ctx context.Context, fn func(context.Context) (any, erro
 	}
 	fmt.Fprintln(a.out, string(data))
 	return nil
+}
+
+func parsePromptArguments(parts []string) (map[string]string, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	arguments := make(map[string]string, len(parts))
+	for _, part := range parts {
+		key, value, ok := strings.Cut(part, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("invalid prompt argument %q, expected key=value", part)
+		}
+		arguments[key] = value
+	}
+	return arguments, nil
 }

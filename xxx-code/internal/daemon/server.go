@@ -91,6 +91,32 @@ type cancelAgentRequest struct {
 	Recursive bool `json:"recursive,omitempty"`
 }
 
+type mcpReadResourceRequest struct {
+	Server string `json:"server"`
+	URI    string `json:"uri"`
+}
+
+type mcpGetPromptRequest struct {
+	Server    string            `json:"server"`
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+type sessionMCPSummary struct {
+	ConfigPath  string                    `json:"config_path,omitempty"`
+	ServerCount int                       `json:"server_count"`
+	ToolCount   int                       `json:"tool_count"`
+	Statuses    []mcpruntime.ServerStatus `json:"statuses"`
+}
+
+type sessionHookConfig struct {
+	BeforeTool string `json:"before_tool,omitempty"`
+	AfterTool  string `json:"after_tool,omitempty"`
+	AfterTurn  string `json:"after_turn,omitempty"`
+	AgentEvent string `json:"agent_event,omitempty"`
+	Timeout    string `json:"timeout,omitempty"`
+}
+
 func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFactory) *Server {
 	if out == nil {
 		out = io.Discard
@@ -290,6 +316,20 @@ func (s *Server) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"session": session.summary()})
+	case "policy":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"policy": session.runner.PermissionPolicy()})
+	case "hooks":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"hooks": session.hookConfig()})
+	case "mcp":
+		s.handleMCPRoutes(w, r, session, parts[2:])
 	case "agents":
 		s.handleAgentRoutes(w, r, session, parts[2:])
 	case "workflows":
@@ -426,6 +466,93 @@ func (s *Server) handleWorkflowRoutes(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func (s *Server) handleMCPRoutes(w http.ResponseWriter, r *http.Request, session *managedSession, parts []string) {
+	if len(parts) == 0 {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"mcp": session.mcpSummary()})
+		return
+	}
+	if session.mcpManager == nil {
+		writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
+		return
+	}
+
+	serverName := strings.TrimSpace(r.URL.Query().Get("server"))
+
+	switch parts[0] {
+	case "resources":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		resources, err := session.mcpManager.ListResources(r.Context(), serverName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"resources": resources})
+	case "resource-templates":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		templates, err := session.mcpManager.ListResourceTemplates(r.Context(), serverName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"resource_templates": templates})
+	case "prompts":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		prompts, err := session.mcpManager.ListPrompts(r.Context(), serverName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"prompts": prompts})
+	case "read-resource":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var req mcpReadResourceRequest
+		if err := decodeBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		resource, err := session.mcpManager.ReadResource(r.Context(), strings.TrimSpace(req.Server), strings.TrimSpace(req.URI))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"resource": resource})
+	case "get-prompt":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var req mcpGetPromptRequest
+		if err := decodeBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		prompt, err := session.mcpManager.GetPrompt(r.Context(), strings.TrimSpace(req.Server), strings.TrimSpace(req.Name), req.Arguments)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"prompt": prompt})
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func (s *Server) openSession(ctx context.Context, id string, resume bool) (*managedSession, error) {
@@ -658,6 +785,33 @@ func (m *managedSession) summary() sessionSummary {
 		summary.SavedAt = state.ModTime().UTC()
 	}
 	return summary
+}
+
+func (m *managedSession) mcpSummary() sessionMCPSummary {
+	summary := sessionMCPSummary{
+		Statuses: []mcpruntime.ServerStatus{},
+	}
+	if m == nil || m.mcpManager == nil {
+		return summary
+	}
+	summary.ConfigPath = m.mcpManager.ConfigPath()
+	summary.ServerCount = m.mcpManager.ServerCount()
+	summary.ToolCount = m.mcpManager.ToolCount()
+	summary.Statuses = m.mcpManager.Statuses()
+	return summary
+}
+
+func (m *managedSession) hookConfig() sessionHookConfig {
+	if m == nil {
+		return sessionHookConfig{}
+	}
+	return sessionHookConfig{
+		BeforeTool: m.config.HookBeforeTool,
+		AfterTool:  m.config.HookAfterTool,
+		AfterTurn:  m.config.HookAfterTurn,
+		AgentEvent: m.config.HookAgentEvent,
+		Timeout:    m.config.HookTimeout.String(),
+	}
 }
 
 func (m *managedSession) messages(limit int) []engine.Message {
