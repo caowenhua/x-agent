@@ -1,0 +1,214 @@
+package daemon
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/caowenhua/x-agent/xxx-code/internal/config"
+	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+)
+
+type daemonTestProvider struct{}
+
+func (p *daemonTestProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+	text := ""
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		if request.Messages[i].Role == engine.RoleUser {
+			text = request.Messages[i].Text()
+			break
+		}
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+text),
+	}, nil
+}
+
+func TestDaemonSessionLifecycle(t *testing.T) {
+	server, testServer := newTestDaemon(t)
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	created := postJSON(t, testServer.URL+"/v1/sessions", map[string]any{}, http.StatusCreated)
+	session := created["session"].(map[string]any)
+	sessionID := session["id"].(string)
+
+	result := postJSON(t, testServer.URL+"/v1/sessions/"+sessionID+"/turns", map[string]any{
+		"prompt": "hello daemon",
+	}, http.StatusOK)
+	runResult := result["result"].(map[string]any)
+	if runResult["final_text"] != "reply:hello daemon" {
+		t.Fatalf("unexpected final text: %+v", runResult)
+	}
+
+	messages := getJSON(t, testServer.URL+"/v1/sessions/"+sessionID+"/messages?limit=2", http.StatusOK)
+	if got := len(messages["messages"].([]any)); got != 2 {
+		t.Fatalf("expected 2 messages, got %d", got)
+	}
+
+	sessions := getJSON(t, testServer.URL+"/v1/sessions", http.StatusOK)
+	items := sessions["sessions"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one session, got %d", len(items))
+	}
+	summary := items[0].(map[string]any)
+	if summary["id"] != sessionID {
+		t.Fatalf("unexpected session summary: %+v", summary)
+	}
+	if summary["loaded"] != true {
+		t.Fatalf("expected loaded session summary, got %+v", summary)
+	}
+}
+
+func TestDaemonCanReloadSavedSession(t *testing.T) {
+	cfg := newTestConfig(t)
+	serverA := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	httpA := httptest.NewServer(serverA.Handler())
+
+	created := postJSON(t, httpA.URL+"/v1/sessions", map[string]any{}, http.StatusCreated)
+	sessionID := created["session"].(map[string]any)["id"].(string)
+	postJSON(t, httpA.URL+"/v1/sessions/"+sessionID+"/turns", map[string]any{
+		"prompt": "first turn",
+	}, http.StatusOK)
+
+	httpA.Close()
+	if err := serverA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	serverB := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	httpB := httptest.NewServer(serverB.Handler())
+	defer func() {
+		_ = serverB.Close()
+		httpB.Close()
+	}()
+
+	sessions := getJSON(t, httpB.URL+"/v1/sessions", http.StatusOK)
+	items := sessions["sessions"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one saved session, got %d", len(items))
+	}
+	summary := items[0].(map[string]any)
+	if summary["id"] != sessionID {
+		t.Fatalf("unexpected persisted session summary: %+v", summary)
+	}
+	if summary["loaded"] != false {
+		t.Fatalf("expected persisted session to be unloaded before reopen, got %+v", summary)
+	}
+
+	postJSON(t, httpB.URL+"/v1/sessions/"+sessionID+"/turns", map[string]any{
+		"prompt": "second turn",
+	}, http.StatusOK)
+
+	messages := getJSON(t, httpB.URL+"/v1/sessions/"+sessionID+"/messages", http.StatusOK)
+	items = messages["messages"].([]any)
+	if len(items) != 4 {
+		t.Fatalf("expected 4 resumed messages, got %d", len(items))
+	}
+	var texts []string
+	for _, item := range items {
+		message := item.(map[string]any)
+		content := message["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		block := content[0].(map[string]any)
+		if text, ok := block["text"].(string); ok {
+			texts = append(texts, text)
+		}
+	}
+	joined := strings.Join(texts, " | ")
+	if !strings.Contains(joined, "first turn") || !strings.Contains(joined, "second turn") {
+		t.Fatalf("expected resumed transcript, got %s", joined)
+	}
+}
+
+func newTestDaemon(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
+	cfg := newTestConfig(t)
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	return server, httptest.NewServer(server.Handler())
+}
+
+func newTestConfig(t *testing.T) config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	return config.Config{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		MaxTokens:         4096,
+		MaxParallelAgents: 2,
+		ContextBudget:     4000,
+		CompactKeep:       6,
+		WorkingDir:        dir,
+		DaemonDir:         filepath.Join(dir, ".xxx-code", "daemon"),
+		ToolTimeout:       2 * time.Second,
+		HookTimeout:       time.Second,
+		ReadRoots:         []string{dir},
+		WriteRoots:        []string{dir},
+		BashEnabled:       true,
+	}
+}
+
+func postJSON(t *testing.T, url string, body any, wantStatus int) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return doJSON(t, req, wantStatus)
+}
+
+func getJSON(t *testing.T, url string, wantStatus int) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doJSON(t, req, wantStatus)
+}
+
+func doJSON(t *testing.T, req *http.Request, wantStatus int) map[string]any {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}

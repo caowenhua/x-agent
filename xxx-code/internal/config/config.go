@@ -33,6 +33,9 @@ type Config struct {
 	MaxParallelAgents int
 	ContextBudget     int
 	CompactKeep       int
+	Daemon            bool
+	DaemonListenAddr  string
+	DaemonDir         string
 	WorkingDir        string
 	SessionFile       string
 	MCPConfigFile     string
@@ -69,6 +72,8 @@ func Load() (Config, error) {
 	flag.IntVar(&cfg.MaxParallelAgents, "max-parallel-agents", 4, "Maximum number of sub-agents that can run concurrently")
 	flag.IntVar(&cfg.ContextBudget, "context-budget", 120000, "Approximate context token budget before automatic compaction; set 0 to disable")
 	flag.IntVar(&cfg.CompactKeep, "compact-keep", 12, "How many latest messages to keep verbatim during automatic compaction")
+	flag.BoolVar(&cfg.Daemon, "daemon", false, "Run xxx-code as a persistent HTTP daemon")
+	flag.StringVar(&cfg.DaemonListenAddr, "listen", firstNonEmpty(os.Getenv("XXX_CODE_LISTEN"), "127.0.0.1:7331"), "Listen address for daemon mode")
 	flag.BoolVar(&cfg.ReadOnly, "read-only", false, "Disable write_file and edit_file tool writes")
 	flag.BoolVar(&cfg.BashEnabled, "bash", true, "Enable or disable the bash tool")
 	flag.BoolVar(&cfg.Print, "print", false, "Run once and exit")
@@ -81,6 +86,7 @@ func Load() (Config, error) {
 	systemPromptFile := flag.String("system-prompt-file", "", "Read the system prompt from a file")
 	cwdFlag := flag.String("cwd", "", "Working directory")
 	sessionFileFlag := flag.String("session-file", "", "Path to the persisted session file")
+	daemonDirFlag := flag.String("daemon-dir", "", "Directory for daemon-managed remote sessions")
 	mcpConfigFlag := flag.String("mcp-config", strings.TrimSpace(os.Getenv("XXX_CODE_MCP_CONFIG")), "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
 	readRootsFlag := flag.String("allow-read", "", "Comma-separated read roots; the working directory is always included")
 	writeRootsFlag := flag.String("allow-write", "", "Comma-separated write roots; the working directory is always included unless --read-only is set")
@@ -119,6 +125,11 @@ func Load() (Config, error) {
 		}
 	} else {
 		cfg.SessionFile = filepath.Join(cfg.WorkingDir, ".xxx-code", "session.json")
+	}
+	if strings.TrimSpace(*daemonDirFlag) != "" {
+		cfg.DaemonDir = resolvePath(cfg.WorkingDir, *daemonDirFlag)
+	} else {
+		cfg.DaemonDir = filepath.Join(cfg.WorkingDir, ".xxx-code", "daemon")
 	}
 
 	if strings.TrimSpace(*mcpConfigFlag) != "" {

@@ -17,6 +17,9 @@ import (
 
 type WorkflowStatus string
 
+type FanoutTaskResultAlias = fanoutTaskResult
+type AgentTaskInputAlias = agentTaskInput
+
 const (
 	WorkflowRunning     WorkflowStatus = "running"
 	WorkflowCompleted   WorkflowStatus = "completed"

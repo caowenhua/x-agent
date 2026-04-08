@@ -13,6 +13,7 @@
 - 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse / ws）
 - 主会话流式文本输出
 - REPL 与单次执行模式
+- HTTP daemon 与远程 session API
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
 - workflow 的 `list / get / resume`
@@ -26,6 +27,7 @@ xxx-code/
   cmd/xxx-code/              CLI 入口
   internal/cli/              REPL、事件输出、自动保存
   internal/config/           配置与参数
+  internal/daemon/           常驻 HTTP daemon、远程 session API
   internal/engine/           核心运行时、消息模型、主循环、agent 管理
   internal/mcp/              MCP 配置加载、stdio/http/sse client、动态 tool bridge
   internal/persist/          session、agent 与 workflow 状态持久化
@@ -105,6 +107,62 @@ go run ./cmd/xxx-code --print "分析当前目录的 Go 项目结构并给出修
 ```bash
 go run ./cmd/xxx-code --stream=false
 ```
+
+## Daemon 模式
+
+如果你想把 `xxx-code` 当成一个常驻的远程 agent runtime，而不是只在本地 REPL 里用，可以直接启动 daemon：
+
+```bash
+go run ./cmd/xxx-code \
+  --daemon \
+  --listen 127.0.0.1:7331
+```
+
+daemon 会把远程 session 存到：
+
+```text
+.xxx-code/daemon/sessions/
+```
+
+也可以显式改目录：
+
+```bash
+go run ./cmd/xxx-code \
+  --daemon \
+  --daemon-dir /tmp/xxx-code-daemon
+```
+
+目前内置的是一套简单 JSON API，比较常用的入口有：
+
+- `GET /healthz`
+- `GET /v1/sessions`
+- `POST /v1/sessions`
+- `GET /v1/sessions/{id}`
+- `GET /v1/sessions/{id}/messages?limit=20`
+- `POST /v1/sessions/{id}/turns`
+- `GET /v1/sessions/{id}/agents`
+- `POST /v1/sessions/{id}/agents/{agent_id}/send`
+- `POST /v1/sessions/{id}/agents/{agent_id}/cancel`
+- `POST /v1/sessions/{id}/agents/{agent_id}/wait`
+- `GET /v1/sessions/{id}/workflows`
+- `GET /v1/sessions/{id}/workflows/{workflow_id}`
+- `POST /v1/sessions/{id}/workflows/{workflow_id}/resume`
+
+例如新建一个远程 session：
+
+```bash
+curl -s http://127.0.0.1:7331/v1/sessions -X POST
+```
+
+然后驱动它跑一轮：
+
+```bash
+curl -s http://127.0.0.1:7331/v1/sessions/<id>/turns \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"分析当前目录代码结构"}'
+```
+
+这样别的服务、脚本或上层 orchestrator 就可以把 `xxx-code` 当作一个远程 agent backend 去调。
 
 ## Session 持久化与恢复
 
@@ -465,6 +523,5 @@ go test ./...
 这一版仍然刻意没有覆盖 TypeScript 版里特别重的产品层：
 
 - 更完整的流式 TUI / 富交互界面
-- remote agent / bridge / daemon
 
 但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。
