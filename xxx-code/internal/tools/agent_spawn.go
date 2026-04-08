@@ -189,13 +189,14 @@ func (t *AgentSendTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 }
 
 type agentTaskInput struct {
-	Name           string `json:"name,omitempty"`
-	Prompt         string `json:"prompt"`
-	Priority       int    `json:"priority,omitempty"`
-	Model          string `json:"model,omitempty"`
-	MaxTurns       int    `json:"max_turns,omitempty"`
-	InheritHistory bool   `json:"inherit_history,omitempty"`
-	WorkingDir     string `json:"working_dir,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	Prompt         string   `json:"prompt"`
+	DependsOn      []string `json:"depends_on,omitempty"`
+	Priority       int      `json:"priority,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	MaxTurns       int      `json:"max_turns,omitempty"`
+	InheritHistory bool     `json:"inherit_history,omitempty"`
+	WorkingDir     string   `json:"working_dir,omitempty"`
 }
 
 type AgentFanoutTool struct{}
@@ -225,6 +226,11 @@ func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
 							"prompt": map[string]any{
 								"type":        "string",
 								"description": "Task for the sub-agent.",
+							},
+							"depends_on": map[string]any{
+								"type":        "array",
+								"items":       map[string]any{"type": "string"},
+								"description": "Optional dependency list by task name. Requires wait=true.",
 							},
 							"priority": map[string]any{
 								"type":        "integer",
@@ -272,6 +278,34 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 	}
 	if len(args.Tasks) == 0 {
 		return engine.ToolResult{}, fmt.Errorf("tasks must not be empty")
+	}
+
+	plan, hasDependencies, err := buildFanoutPlan(args.Tasks)
+	if err != nil {
+		return engine.ToolResult{}, err
+	}
+	if hasDependencies && !args.Wait {
+		return engine.ToolResult{}, fmt.Errorf("depends_on requires wait=true so xxx-code can orchestrate the workflow")
+	}
+	if hasDependencies {
+		waitCtx := ctx
+		if args.TimeoutSeconds > 0 {
+			var cancel context.CancelFunc
+			waitCtx, cancel = context.WithTimeout(ctx, time.Duration(args.TimeoutSeconds)*time.Second)
+			defer cancel()
+		}
+
+		results, snapshots, err := executeFanoutPlan(waitCtx, execCtx, plan)
+		if err != nil {
+			return engine.ToolResult{}, err
+		}
+		return engine.ToolResult{
+			Content: mustJSON(map[string]any{
+				"agents": snapshots,
+				"tasks":  results,
+			}),
+			IsError: hasFanoutTaskErrors(results),
+		}, nil
 	}
 
 	spawned := make([]engine.AgentSnapshot, 0, len(args.Tasks))
@@ -485,6 +519,314 @@ func isTerminalAgentError(status engine.AgentStatus) bool {
 func hasAgentErrors(snapshots []engine.AgentSnapshot) bool {
 	for _, snapshot := range snapshots {
 		if isTerminalAgentError(snapshot.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+type fanoutTaskResult struct {
+	Name      string   `json:"name"`
+	Prompt    string   `json:"prompt"`
+	DependsOn []string `json:"depends_on,omitempty"`
+	Priority  int      `json:"priority,omitempty"`
+	AgentID   string   `json:"agent_id,omitempty"`
+	Status    string   `json:"status"`
+	Result    string   `json:"result,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
+type plannedFanoutTask struct {
+	index      int
+	task       agentTaskInput
+	key        string
+	dependsOn  []string
+	depIndexes []int
+	started    bool
+	done       bool
+	agentID    string
+	snapshot   *engine.AgentSnapshot
+	result     fanoutTaskResult
+}
+
+type fanoutWaitResult struct {
+	index    int
+	agentID  string
+	snapshot engine.AgentSnapshot
+	err      error
+}
+
+func buildFanoutPlan(tasks []agentTaskInput) ([]*plannedFanoutTask, bool, error) {
+	plan := make([]*plannedFanoutTask, 0, len(tasks))
+	nameIndex := make(map[string]int, len(tasks))
+	hasDependencies := false
+
+	for i, task := range tasks {
+		name := strings.TrimSpace(task.Name)
+		if name != "" {
+			if _, exists := nameIndex[name]; exists {
+				return nil, false, fmt.Errorf("duplicate task name in agent_fanout: %s", name)
+			}
+			nameIndex[name] = i
+		}
+
+		displayName := name
+		if displayName == "" {
+			displayName = fmt.Sprintf("task_%d", i+1)
+		}
+		normalizedDeps := normalizeTaskDependencies(task.DependsOn)
+		if len(normalizedDeps) > 0 {
+			hasDependencies = true
+		}
+		plan = append(plan, &plannedFanoutTask{
+			index:     i,
+			task:      task,
+			key:       displayName,
+			dependsOn: normalizedDeps,
+			result: fanoutTaskResult{
+				Name:      displayName,
+				Prompt:    task.Prompt,
+				DependsOn: append([]string(nil), normalizedDeps...),
+				Priority:  task.Priority,
+			},
+		})
+	}
+
+	for _, item := range plan {
+		item.depIndexes = make([]int, 0, len(item.dependsOn))
+		for _, dep := range item.dependsOn {
+			index, ok := nameIndex[dep]
+			if !ok {
+				return nil, false, fmt.Errorf("task %s depends on unknown task %s", item.key, dep)
+			}
+			item.depIndexes = append(item.depIndexes, index)
+		}
+		if name := strings.TrimSpace(item.task.Name); name != "" && containsString(item.dependsOn, name) {
+			return nil, false, fmt.Errorf("task %s cannot depend on itself", item.key)
+		}
+	}
+
+	if err := validateFanoutPlanCycles(plan); err != nil {
+		return nil, false, err
+	}
+	return plan, hasDependencies, nil
+}
+
+func validateFanoutPlanCycles(plan []*plannedFanoutTask) error {
+	const (
+		visitNew = iota
+		visitActive
+		visitDone
+	)
+
+	state := make([]int, len(plan))
+	var visit func(int) error
+	visit = func(index int) error {
+		switch state[index] {
+		case visitActive:
+			return fmt.Errorf("dependency cycle detected at task %s", plan[index].key)
+		case visitDone:
+			return nil
+		}
+		state[index] = visitActive
+		for _, depIndex := range plan[index].depIndexes {
+			if err := visit(depIndex); err != nil {
+				return err
+			}
+		}
+		state[index] = visitDone
+		return nil
+	}
+
+	for index := range plan {
+		if err := visit(index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, plan []*plannedFanoutTask) ([]fanoutTaskResult, []engine.AgentSnapshot, error) {
+	active := make(map[string]int, len(plan))
+	resultsCh := make(chan fanoutWaitResult, len(plan))
+
+	launchReady := func() error {
+		for _, item := range plan {
+			if item.started || item.done {
+				continue
+			}
+
+			if failedDep, depStatus, ok := firstFailedDependency(item, plan); ok {
+				item.done = true
+				item.result.Status = "skipped"
+				item.result.Error = fmt.Sprintf("skipped because dependency %s finished with status %s", failedDep, depStatus)
+				continue
+			}
+			if !dependenciesSatisfied(item, plan) {
+				continue
+			}
+
+			snapshot, err := execCtx.Runner.SpawnAgent(execCtx, engine.SpawnRequest{
+				Name:           item.task.Name,
+				Prompt:         item.task.Prompt,
+				Background:     true,
+				Priority:       item.task.Priority,
+				Model:          item.task.Model,
+				MaxTurns:       item.task.MaxTurns,
+				InheritHistory: item.task.InheritHistory,
+				WorkingDir:     item.task.WorkingDir,
+			})
+			if err != nil {
+				item.done = true
+				item.result.Status = string(engine.AgentFailed)
+				item.result.Error = err.Error()
+				continue
+			}
+
+			item.started = true
+			item.agentID = snapshot.ID
+			item.result.AgentID = snapshot.ID
+			active[snapshot.ID] = item.index
+
+			go func(index int, agentID string) {
+				snapshot, err := execCtx.Runner.WaitAgent(ctx, agentID)
+				resultsCh <- fanoutWaitResult{
+					index:    index,
+					agentID:  agentID,
+					snapshot: snapshot,
+					err:      err,
+				}
+			}(item.index, snapshot.ID)
+		}
+		return nil
+	}
+
+	if err := launchReady(); err != nil {
+		return nil, nil, err
+	}
+
+	for completedCount(plan) < len(plan) {
+		if len(active) == 0 {
+			if err := launchReady(); err != nil {
+				return nil, nil, err
+			}
+			if len(active) == 0 {
+				if completedCount(plan) == len(plan) {
+					break
+				}
+				return nil, nil, fmt.Errorf("agent_fanout workflow made no progress; check dependencies")
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			cancelFanoutAgents(execCtx, active)
+			return nil, nil, ctx.Err()
+		case item := <-resultsCh:
+			delete(active, item.agentID)
+			if item.err != nil {
+				cancelFanoutAgents(execCtx, active)
+				return nil, nil, item.err
+			}
+
+			current := plan[item.index]
+			current.done = true
+			current.snapshot = &item.snapshot
+			current.result.AgentID = item.snapshot.ID
+			current.result.Status = string(item.snapshot.Status)
+			current.result.Result = item.snapshot.Result
+			current.result.Error = item.snapshot.Error
+
+			if err := launchReady(); err != nil {
+				cancelFanoutAgents(execCtx, active)
+				return nil, nil, err
+			}
+		}
+	}
+
+	results := make([]fanoutTaskResult, 0, len(plan))
+	snapshots := make([]engine.AgentSnapshot, 0, len(plan))
+	for _, item := range plan {
+		results = append(results, item.result)
+		if item.snapshot != nil {
+			snapshots = append(snapshots, *item.snapshot)
+		}
+	}
+	return results, snapshots, nil
+}
+
+func completedCount(plan []*plannedFanoutTask) int {
+	count := 0
+	for _, item := range plan {
+		if item.done {
+			count++
+		}
+	}
+	return count
+}
+
+func dependenciesSatisfied(item *plannedFanoutTask, plan []*plannedFanoutTask) bool {
+	for _, depIndex := range item.depIndexes {
+		dependency := plan[depIndex]
+		if !dependency.done {
+			return false
+		}
+		if dependency.result.Status != string(engine.AgentIdle) {
+			return false
+		}
+	}
+	return true
+}
+
+func firstFailedDependency(item *plannedFanoutTask, plan []*plannedFanoutTask) (string, string, bool) {
+	for depPos, depIndex := range item.depIndexes {
+		dependency := plan[depIndex]
+		if !dependency.done {
+			continue
+		}
+		if dependency.result.Status == string(engine.AgentIdle) {
+			continue
+		}
+		return item.dependsOn[depPos], dependency.result.Status, true
+	}
+	return "", "", false
+}
+
+func cancelFanoutAgents(execCtx *engine.ExecutionContext, active map[string]int) {
+	for agentID := range active {
+		_, _ = execCtx.Runner.CancelAgent(context.Background(), agentID, true)
+	}
+}
+
+func hasFanoutTaskErrors(results []fanoutTaskResult) bool {
+	for _, item := range results {
+		if item.Status != string(engine.AgentIdle) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeTaskDependencies(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
 			return true
 		}
 	}

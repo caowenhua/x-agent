@@ -302,13 +302,16 @@ go run ./cmd/xxx-code \
 {
   "tasks": [
     {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4},
-    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8}
+    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8},
+    {"name": "writer", "prompt": "基于 reader 和 tester 的结果输出结论", "depends_on": ["reader", "tester"]}
   ],
   "wait": true
 }
 ```
 
-这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join。
+`depends_on` 会按任务名建立依赖图。前置任务成功后，下游任务才会启动；如果前置任务失败或取消，下游任务会被标记成 `skipped`，不会继续消耗 agent 槽位。为了保证这个编排过程可控，带依赖的 fanout 目前要求 `wait=true`。
+
+这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 
 ## 常用参数
 
@@ -386,6 +389,6 @@ go test ./...
 - 更细粒度的权限系统
 - 远程 MCP transport 里的 `ws`
 - remote agent / bridge / daemon
-- 更完整的任务依赖图、资源配额与抢占式调度
+- 资源配额、抢占式调度与更复杂的 workflow 恢复
 
 但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。

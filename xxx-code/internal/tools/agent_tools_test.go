@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -25,6 +26,34 @@ func latestToolUserText(messages []engine.Message) string {
 		}
 	}
 	return ""
+}
+
+type conditionalToolPromptProvider struct{}
+
+func (p *conditionalToolPromptProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+	text := latestToolUserText(request.Messages)
+	if strings.Contains(text, "fail") {
+		return engine.CompletionResponse{}, errors.New("forced failure: " + text)
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+text),
+	}, nil
+}
+
+type fanoutResponse struct {
+	Agents []engine.AgentSnapshot `json:"agents"`
+	Tasks  []fanoutTaskPayload    `json:"tasks"`
+}
+
+type fanoutTaskPayload struct {
+	Name      string   `json:"name"`
+	Status    string   `json:"status"`
+	Prompt    string   `json:"prompt"`
+	DependsOn []string `json:"depends_on"`
+	AgentID   string   `json:"agent_id"`
+	Result    string   `json:"result"`
+	Error     string   `json:"error"`
 }
 
 func TestAgentFanoutToolWaitsForBatch(t *testing.T) {
@@ -146,4 +175,184 @@ func TestAgentSpawnToolPropagatesPriority(t *testing.T) {
 	if snapshots[0].Priority != 7 {
 		t.Fatalf("expected priority 7, got %+v", snapshots[0])
 	}
+}
+
+func TestAgentFanoutToolSupportsDependencies(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "plan", "prompt": "plan work"},
+			{"name": "implement", "prompt": "implement work", "depends_on": []string{"plan"}},
+			{"name": "docs", "prompt": "document work", "depends_on": []string{"plan"}},
+		},
+	})
+
+	result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error result: %s", result.Content)
+	}
+
+	var payload fanoutResponse
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Agents) != 3 || len(payload.Tasks) != 3 {
+		t.Fatalf("expected 3 agents and 3 tasks, got %+v", payload)
+	}
+
+	byName := mapFanoutTasks(payload.Tasks)
+	if byName["plan"].Status != "idle" {
+		t.Fatalf("expected plan task to complete, got %+v", byName["plan"])
+	}
+	if byName["implement"].Status != "idle" {
+		t.Fatalf("expected implement task to complete, got %+v", byName["implement"])
+	}
+	if byName["docs"].Status != "idle" {
+		t.Fatalf("expected docs task to complete, got %+v", byName["docs"])
+	}
+}
+
+func TestAgentFanoutToolSkipsTasksWithFailedDependencies(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&conditionalToolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "plan", "prompt": "fail planning"},
+			{"name": "implement", "prompt": "implement work", "depends_on": []string{"plan"}},
+			{"name": "docs", "prompt": "document work"},
+		},
+	})
+
+	result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected workflow error result, got success: %s", result.Content)
+	}
+
+	var payload fanoutResponse
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Agents) != 2 {
+		t.Fatalf("expected only spawned agents to be returned, got %+v", payload.Agents)
+	}
+
+	byName := mapFanoutTasks(payload.Tasks)
+	if byName["plan"].Status != "failed" {
+		t.Fatalf("expected failed plan task, got %+v", byName["plan"])
+	}
+	if byName["implement"].Status != "skipped" {
+		t.Fatalf("expected skipped dependent task, got %+v", byName["implement"])
+	}
+	if byName["implement"].AgentID != "" {
+		t.Fatalf("expected skipped dependent task to have no agent id, got %+v", byName["implement"])
+	}
+	if !strings.Contains(byName["implement"].Error, "dependency plan") {
+		t.Fatalf("expected dependency skip reason, got %+v", byName["implement"])
+	}
+	if byName["docs"].Status != "idle" {
+		t.Fatalf("expected independent task to complete, got %+v", byName["docs"])
+	}
+}
+
+func TestAgentFanoutToolRejectsDependenciesWithoutWait(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": false,
+		"tasks": []map[string]any{
+			{"name": "plan", "prompt": "plan work"},
+			{"name": "implement", "prompt": "implement work", "depends_on": []string{"plan"}},
+		},
+	})
+
+	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err == nil || !strings.Contains(err.Error(), "depends_on requires wait=true") {
+		t.Fatalf("expected depends_on wait validation error, got %v", err)
+	}
+}
+
+func TestAgentFanoutToolRejectsDependencyCycles(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "plan", "prompt": "plan work", "depends_on": []string{"implement"}},
+			{"name": "implement", "prompt": "implement work", "depends_on": []string{"plan"}},
+		},
+	})
+
+	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
+		t.Fatalf("expected dependency cycle error, got %v", err)
+	}
+}
+
+func mapFanoutTasks(tasks []fanoutTaskPayload) map[string]fanoutTaskPayload {
+	byName := make(map[string]fanoutTaskPayload, len(tasks))
+	for _, task := range tasks {
+		byName[task.Name] = task
+	}
+	return byName
 }
