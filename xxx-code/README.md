@@ -1,96 +1,403 @@
 # xxx-code
 
-`xxx-code` 是一个用 Go 实现的终端 coding agent，目标不是机械复刻 TypeScript 版 Claude Code 的全部产品表层，而是先把最核心的 agent runtime、多轮工具循环和 multi-agent 基础设施做成一个可运行、可继续演化的内核。
+`xxx-code` 是一个用 Go 实现的终端原生 coding agent runtime。
 
-当前版本已经包含：
+它受 Claude Code 的产品思路启发，但目标不是逐层复刻前端交互，而是把最关键的能力做成一个稳定、可部署、可扩展的系统内核：
 
-- 多 provider 选择（anthropic / openai / gpt / azure-openai / gemini / minimax / glm）
-- Anthropic Messages API 适配
-- 多轮 agent loop
-- 自动上下文压缩与 context budget 保护
-- 文件/命令权限策略
-- lifecycle hooks 扩展点
-- 本地工具调用
-- 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse / ws）
-- MCP health / reload / validate 管理能力
-- 插件目录、manifest 与命令型插件工具桥接
-- 主会话流式文本输出
-- REPL、TUI 与单次执行模式
-- HTTP daemon、远程 bridge 与 session API
-- daemon 审计日志、ACL 与 per-client 速率限制
-- in-process multi-agent 基础设施
-- 子 agent 的 `spawn / send / cancel / wait / list`
-- workflow 的 `list / get / tasks / resume`
-- agent 并发上限、优先级与排队调度
-- transcript、workflow 状态持久化与 `resume`
-- workflow artifact manifest 与 task result artifact
-- `version` / build metadata
-- GoReleaser 发布配置与 GitHub release workflow
-- config file、env、flags 的优先级配置体系
-- trace id、request logging 与 `--log-file` 诊断输出
+- 本地 CLI / REPL / TUI
+- 多轮 agent 推理与工具调用
+- multi-agent 与 workflow 编排
+- MCP 与插件扩展
+- daemon / remote bridge / remote TUI
+- 权限、审计、恢复、流式输出、配置治理
+
+如果你想要的是一个“能在终端里直接干活”的 Go 版 agent，并且后续还要把它当成多 agent 平台、守护进程或者自动化基础设施继续演进，`xxx-code` 就是为这个方向设计的。
+
+## 它是什么
+
+从定位上看，`xxx-code` 不是一个简单的“调用模型 API 的 CLI”，而是一个完整的 agent runtime：
+
+- 它会维护会话 transcript，而不是只做单轮问答
+- 它会把工具注册成统一的 registry，让模型通过 tool calling 驱动系统
+- 它支持子 agent、workflow、恢复、排队、优先级、重试、超时、资源配额
+- 它支持把 MCP server、命令型插件、hooks、daemon API 都收进同一套运行时边界里
+- 它既能本地跑，也能作为远程 daemon 持续运行，再由 remote bridge 或 remote TUI 连接
+
+一句话总结：
+
+> `xxx-code` 是“终端交互 + agent runtime + orchestration + remote runtime”四层合一的 Go 项目。
+
+## 它能做什么
+
+`xxx-code` 适合的事情很多，但最典型的是这几类：
+
+1. 代码库理解与分析  
+   例如让它扫描项目结构、梳理模块关系、解释某条调用链、定位某个错误的根因。
+
+2. 小到中等规模的编码任务  
+   例如改一个接口、补一个 CLI 参数、修一个测试、增加一个 provider、补一个 daemon API。
+
+3. 多步骤自动化  
+   例如“先搜索代码，再生成修改方案，再改代码，再跑测试，再汇总结果”。
+
+4. 多 agent 并行分解任务  
+   例如把“梳理前端、后端、部署、测试”拆成多个 agent 并发推进，再在主会话里汇总结果。
+
+5. 长时运行的远程代理  
+   例如把它跑成 daemon，团队里的本地 CLI/TUI 再去连这个远程实例。
+
+6. 外部能力接入  
+   例如通过 MCP 接入浏览器、数据库、文档系统；通过插件接入内部工具；通过 hooks 发事件。
+
+7. 可审计的 agent 平台能力  
+   例如记录请求、权限阻止、agent 生命周期、workflow 状态和 daemon 审计日志。
+
+## 核心功能总览
+
+### 交互层
+
+- 本地 REPL
+- 本地 TUI
+- 单次执行 `--print`
+- daemon 模式
+- remote bridge
+- remote TUI
+
+### 模型与推理层
+
+- 多轮 tool-calling agent loop
+- 流式文本输出
+- 自动上下文压缩
+- provider 抽象
+- 多 provider 支持：
+  - `anthropic`
+  - `openai`
+  - `gpt`（`openai` 别名）
+  - `azure-openai`
+  - `gemini`
+  - `minimax`
+  - `glm`
+
+### 工具与执行层
+
+- 内建文件工具：
+  - `read_file`
+  - `write_file`
+  - `edit_file`
+  - `glob`
+  - `grep`
+- Shell 工具：
+  - `bash`
+- agent 工具：
+  - `agent_spawn`
+  - `agent_fanout`
+  - `agent_send`
+  - `agent_wait`
+  - `agent_cancel`
+  - `agent_list`
+- workflow 工具：
+  - `workflow_list`
+  - `workflow_get`
+  - `workflow_tasks`
+  - `workflow_resume`
+
+### orchestration 层
+
+- 子 agent 隔离运行
+- 最大并发 agent 数限制
+- agent 优先级与排队
+- fanout workflow
+- `depends_on` 依赖图
+- prompt 引用上游结果
+- `retries`
+- `timeout_seconds`
+- `fail_fast`
+- `resource` / `resource_limits`
+- `preempt_lower_priority`
+- workflow artifact 输出
+- workflow resume
+
+### 扩展层
+
+- MCP client 与动态 tool bridge
+- 支持 `stdio / http / sse / ws`
+- MCP health / reload / validate
+- MCP resources / prompts / resource templates
+- 插件目录与 manifest
+- 命令型插件桥接为动态工具
+- 插件 validate / install / remove / reload
+- hooks shell command
+- hooks JSONL event sink
+
+### 持久化与治理
+
+- 主会话 transcript 持久化
+- agent 状态持久化
+- workflow 状态持久化
+- daemon session 持久化
+- `--resume`
+- 权限策略
+- daemon bearer auth
+- token file 热轮换
+- daemon ACL
+- daemon 审计日志
+- per-client rate limit
+- `--log-level / --debug / --log-file`
+
+## 架构总览
+
+### 总体组件图
+
+```mermaid
+graph TD
+    U["User"] --> L["Local CLI / REPL / TUI"]
+    U --> R["Remote CLI / Remote TUI"]
+
+    L --> C["Config Loader"]
+    R --> RC["Remote Client"]
+    RC --> D["Daemon HTTP API"]
+
+    C --> A["App"]
+    A --> E["Engine Runner"]
+    D --> E
+
+    E --> P["Provider Adapter"]
+    E --> T["Tool Registry"]
+    E --> S["Session / Agent State"]
+
+    T --> B["Built-in Tools"]
+    T --> M["MCP Manager"]
+    T --> G["Plugin Manager"]
+
+    E --> H["Hook Bus"]
+    S --> X["Persistence Store"]
+    S --> W["Workflow Manager"]
+```
+
+### 一次 turn 的执行流
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant App
+    participant Runner
+    participant Provider
+    participant Tools
+
+    User->>App: 输入 prompt
+    App->>Runner: RunTurn(session, prompt)
+    Runner->>Runner: 将 user message 追加到 session
+    Runner->>Provider: createMessage(messages, tools)
+    Provider-->>Runner: assistant text + tool calls
+    Runner->>Tools: 执行工具
+    Tools-->>Runner: tool_result
+    Runner->>Provider: 带 tool_result 再次请求模型
+    loop 直到没有 tool call 或达到 turn 上限
+        Provider-->>Runner: assistant text / tool calls
+    end
+    Runner-->>App: FinalText + Usage + Updated Session
+    App-->>User: 输出结果并保存 session
+```
+
+## 关键设计思路
+
+`xxx-code` 的实现有几条很核心的设计原则，这些原则基本决定了今天的代码结构。
+
+### 1. 交互面和运行时分离
+
+本地 CLI、TUI、daemon、remote bridge 看起来像是不同产品形态，但底层尽量复用同一个 runtime。
+
+这带来的好处是：
+
+- 本地模式和远程模式行为更一致
+- 工具、权限、workflow、resume 不会出现两套逻辑
+- 新能力通常只需要接入一次 engine，而不是每个入口各做一遍
+
+在代码里，这条主线大致是：
+
+- `cmd/xxx-code/main.go`
+- `internal/cli`
+- `internal/remote`
+- `internal/daemon`
+- `internal/engine`
+
+### 2. Session 是事实来源
+
+`xxx-code` 不把“当前状态”散落在很多临时对象里，而是把消息 transcript 当作核心状态：
+
+- 用户消息追加进 session
+- assistant 输出追加进 session
+- tool call / tool result 也进入 session
+- 自动压缩发生时，session 仍是主状态对象
+- persist / resume 最终也是围绕 session 展开
+
+这种设计让“恢复”和“远程继续接着跑”更自然，因为系统总是能回到一个可序列化的会话状态。
+
+### 3. Tool Registry 是统一扩展边界
+
+无论是内建工具、MCP 动态工具还是插件动态工具，最终都收敛到同一套 `Tool` 接口：
+
+```go
+type Tool interface {
+    Definition() ToolDefinition
+    Call(ctx context.Context, exec *ExecutionContext, input json.RawMessage) (ToolResult, error)
+}
+```
+
+这个抽象很重要，因为它让：
+
+- provider 层只需要知道“有哪些工具”
+- runner 只需要知道“怎么按名字找工具、执行工具”
+- MCP / 插件都能被桥接成“一等工具”
+
+所以 `xxx-code` 的扩展方式不是“再发明一套插件协议”，而是先把所有能力统一折叠到 tool registry。
+
+### 4. multi-agent 不是另一个系统，而是 runner 的自然延伸
+
+很多系统会把“agent”和“workflow”做成完全独立的编排引擎，`xxx-code` 则更偏向把它做成 runner 的延长线：
+
+- 子 agent 仍然走同一套 provider + tool loop
+- agent 生命周期仍然在同一个 engine 里管理
+- workflow 只是对多个 agent 执行计划、依赖关系和状态快照的封装
+
+这样做的好处是：
+
+- agent 行为一致
+- tooling 不需要重复实现
+- session / workflow / artifact / persistence 更容易打通
+
+### 5. 默认本地优先，但从一开始就预留远程运行能力
+
+本地 CLI 是默认入口，但系统并没有把“本地”写死：
+
+- session 可以持久化
+- daemon 可以托管远程 session
+- remote client 可以连 daemon
+- remote TUI 可以把本地 UI 体验迁移到远端
+
+也就是说，`xxx-code` 既适合个人机器上直接跑，也适合把 agent runtime 放到某台稳定机器上长期运行。
+
+### 6. 安全不是事后补丁，而是 runtime 层能力
+
+权限、审计、ACL、rate limit 这些东西不是简单堆在网关层，而是深度进入运行时：
+
+- 读写路径受 `PermissionPolicy` 控制
+- `bash` 支持前缀 allow / deny
+- tool 级 allow / deny
+- daemon 有 bearer token、ACL、audit、rate limit
+- hooks 和 policy 阻止会留下结构化痕迹
+
+这意味着 `xxx-code` 更像一个可治理的 agent runtime，而不只是本地玩具。
+
+### 7. YAML-first 配置，便于长期维护
+
+配置层采用：
+
+- 默认值
+- config file
+- env
+- flags
+
+并且默认优先发现 `.xxx-code/config.yaml`。
+
+这样做的原因很简单：
+
+- YAML 更适合写注释
+- 对长期维护的 agent 配置更友好
+- 也更适合团队协作、示例模板和运维
 
 ## 目录结构
 
 ```text
 xxx-code/
-  cmd/xxx-code/              CLI 入口
-  internal/cli/              REPL、事件输出、自动保存
-  internal/config/           配置与参数
-  internal/daemon/           常驻 HTTP daemon、远程 session API
-  internal/remote/           daemon bridge client、远程 REPL
-  internal/engine/           核心运行时、消息模型、主循环、agent 管理
-  internal/mcp/              MCP 配置加载、stdio/http/sse client、动态 tool bridge
-  internal/plugins/          插件 manifest、命令型工具桥接、状态管理
-  internal/persist/          session、agent 与 workflow 状态持久化
-  internal/provider/         模型提供方适配
-  internal/tools/            内建工具
+  cmd/xxx-code/              程序入口
+  docs/                      补充部署文档
+  examples/                  配置模板与 .env 示例
+  internal/
+    auth/                    token file 与鉴权辅助
+    buildinfo/               版本与构建信息
+    cli/                     本地 REPL / TUI
+    config/                  flags / env / YAML / JSON 配置加载
+    daemon/                  HTTP daemon、session API、审计、ACL
+    diag/                    日志与 trace
+    engine/                  runner、session、tool registry、agent state
+    hooks/                   shell hooks 与 JSONL event bus
+    integration/             端到端测试
+    mcp/                     MCP 配置、连接、动态 tool bridge
+    persist/                 session / agents / workflows 持久化
+    plugins/                 插件 manifest、安装、桥接、管理
+    provider/                provider 工厂与具体适配
+    remote/                  daemon client、remote REPL / TUI
+    tools/                   内建工具与 workflow 实现
+  ROADMAP.md                 项目阶段计划
+  README.md                  当前说明文档
 ```
 
-## 已实现的工具
+## 运行模式
 
-- `bash`
-- `read_file`
-- `write_file`
-- `edit_file`
-- `glob`
-- `grep`
-- `agent_spawn`
-- `agent_fanout`
-- `agent_send`
-- `agent_cancel`
-- `agent_wait`
-- `agent_list`
-- `workflow_list`
-- `workflow_get`
-- `workflow_tasks`
-- `workflow_resume`
-- `mcp__<server>__<tool>` 动态 MCP tools
-- `list_mcp_resources`
-- `list_mcp_resource_templates`
-- `read_mcp_resource`
-- `list_mcp_prompts`
-- `get_mcp_prompt`
-- `mcp_health`
-- `mcp_reload`
-- `mcp_validate`
-- `plugin__<plugin>__<tool>` 动态插件 tools
-- `list_plugins`
-- `validate_plugin`
-- `install_plugin`
-- `remove_plugin`
-- `reload_plugins`
+| 模式 | 入口 | 适合场景 |
+| --- | --- | --- |
+| 本地 REPL | `go run ./cmd/xxx-code` | 边聊边改代码 |
+| 本地单次执行 | `go run ./cmd/xxx-code --print "..."` | 脚本化、一次性任务 |
+| 本地 TUI | `go run ./cmd/xxx-code --tui` | 更连续的终端体验 |
+| daemon | `go run ./cmd/xxx-code --daemon` | 持续运行的远程 agent runtime |
+| remote REPL | `go run ./cmd/xxx-code --remote-url ...` | 连接远程 daemon |
+| remote TUI | `go run ./cmd/xxx-code --remote-url ... --tui` | 远程会话的富交互界面 |
 
-## 运行前准备
+## 支持的 provider
 
-先按你选的 provider 设置对应 API key。例如默认 Anthropic：
+| provider | 说明 | 关键环境变量 |
+| --- | --- | --- |
+| `anthropic` | 默认 provider，走 Anthropic Messages 风格适配 | `ANTHROPIC_API_KEY` |
+| `openai` | OpenAI Chat Completions / OpenAI-compatible | `OPENAI_API_KEY` |
+| `gpt` | `openai` 的别名 | `OPENAI_API_KEY` |
+| `azure-openai` | Azure OpenAI，使用 API key 模式 | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_BASE_URL` |
+| `gemini` | 走 Gemini 的 OpenAI-compatible endpoint | `GEMINI_API_KEY` |
+| `minimax` | 走 MiniMax 的 OpenAI-compatible endpoint | `MINIMAX_API_KEY` |
+| `glm` | 走 GLM / BigModel / Zhipu 兼容入口 | `GLM_API_KEY` / `ZHIPUAI_API_KEY` / `BIGMODEL_API_KEY` / `ZAI_API_KEY` |
+
+说明：
+
+- 默认 provider 是 `anthropic`
+- `remote` 客户端本地不需要 provider API key，provider 由 daemon 侧负责
+- 兼容 provider 的目标是统一 runtime 行为，不是强行隐藏各家模型的差异
+
+## 安装与运行
+
+### 环境要求
+
+- Go `1.25.0`
+- 一个可用的模型 API key
+- 如果要用 TUI，需要终端支持基本的交互式能力
+
+### 直接运行
+
+先进入项目目录：
 
 ```bash
-export ANTHROPIC_API_KEY=...
+cd /Users/tt/goworkspace/src/x-agent/xxx-code
 ```
 
-## 版本信息
+设置 provider 所需的 key，例如默认 Anthropic：
 
-查看当前二进制的构建信息：
+```bash
+export ANTHROPIC_API_KEY=your-key
+```
+
+启动本地 REPL：
+
+```bash
+go run ./cmd/xxx-code
+```
+
+### 编译成本地二进制
+
+```bash
+go build -o ./bin/xxx-code ./cmd/xxx-code
+./bin/xxx-code --version
+```
+
+### 查看版本
 
 ```bash
 go run ./cmd/xxx-code --version
@@ -102,517 +409,477 @@ go run ./cmd/xxx-code --version
 go run ./cmd/xxx-code version
 ```
 
-发布产物会通过 ldflags 注入：
+## 快速开始
 
-- version
-- commit
-- build date
-- built by
-- go version / platform
-
-## 配置优先级
-
-`xxx-code` 现在支持 4 层配置来源，优先级从低到高是：
-
-1. 内建默认值
-2. config file
-3. environment variables
-4. CLI flags
-
-默认会自动发现：
-
-```text
-.xxx-code/config.yaml
-```
-
-也可以显式指定：
+### 方式 1：最简单的本地交互
 
 ```bash
-go run ./cmd/xxx-code --config /path/to/config.yaml
-```
-
-运行时现在默认按 YAML 优先发现配置，同时仍兼容旧的 `.json` 配置文件，方便平滑迁移。
-
-仓库里放了可直接改的带注释 YAML 模板：
-
-- [examples/config.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/config.yaml)
-- [examples/anthropic.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/anthropic.yaml)
-- [examples/openai.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/openai.yaml)
-- [examples/gpt.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gpt.yaml)
-- [examples/azure-openai.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/azure-openai.yaml)
-- [examples/gemini.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gemini.yaml)
-- [examples/minimax.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/minimax.yaml)
-- [examples/glm.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/glm.yaml)
-
-环境变量模板也一起放好了：
-
-- [examples/.env.example](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/.env.example)
-
-其中：
-
-- `config.yaml` 和 `anthropic.yaml` 适合默认 Anthropic 场景
-- `azure-openai.yaml` 需要先把 `base_url` 和 `model` 改成你自己的部署信息
-- 其他 provider 模板可以直接按 `provider + model` 为起点改
-- `.env.example` 里对每个环境变量都加了注释，适合做本地 `.env` 起点
-
-比较常用的环境变量有：
-
-- `XXX_CODE_PROVIDER`
-- `XXX_CODE_API_KEY`
-- `XXX_CODE_BASE_URL`
-- `ANTHROPIC_API_KEY`
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `AZURE_OPENAI_API_KEY`
-- `AZURE_OPENAI_BASE_URL`
-- `XXX_CODE_MODEL`
-- `XXX_CODE_REMOTE_URL`
-- `XXX_CODE_REMOTE_TOKEN`
-- `XXX_CODE_REMOTE_TOKEN_FILE`
-- `XXX_CODE_DAEMON_TOKEN`
-- `XXX_CODE_DAEMON_TOKEN_FILE`
-- `XXX_CODE_DAEMON_AUDIT_FILE`
-- `XXX_CODE_DAEMON_ALLOW_MODES`
-- `XXX_CODE_DAEMON_DENY_MODES`
-- `XXX_CODE_DAEMON_ALLOW_SESSION_PREFIX`
-- `XXX_CODE_DAEMON_DENY_SESSION_PREFIX`
-- `XXX_CODE_DAEMON_RATE_LIMIT_PER_MINUTE`
-- `XXX_CODE_DAEMON_RATE_LIMIT_BURST`
-- `XXX_CODE_HOOK_EVENT_FILE`
-- `XXX_CODE_PLUGIN_DIR`
-- `XXX_CODE_LOG_LEVEL`
-- `XXX_CODE_LOG_FILE`
-- `XXX_CODE_CONFIG`
-
-比较常用的诊断 flag 有：
-
-- `--provider anthropic|openai|gpt|azure-openai|gemini|minimax|glm`
-- `--api-key ...`
-- `--plugin-dir .xxx-code/plugins`
-- `--hook-event-file .xxx-code/hooks/events.jsonl`
-- `--log-level info|debug|error`
-- `--debug`
-- `--log-file .xxx-code/xxx-code.log`
-- `--config .xxx-code/config.yaml`
-
-## Provider
-
-`xxx-code` 现在支持这些 provider：
-
-- `anthropic`
-- `openai`
-- `gpt`（`openai` 别名）
-- `azure-openai`
-- `gemini`
-- `minimax`
-- `glm`
-
-默认还是 `anthropic`。你可以用 config、env 或 flag 切换：
-
-```bash
-go run ./cmd/xxx-code \
-  --provider openai \
-  --model gpt-4.1 \
-  --api-key "$OPENAI_API_KEY"
-```
-
-Anthropic 兼容当前默认配置：
-
-```bash
-export ANTHROPIC_API_KEY=...
-go run ./cmd/xxx-code --provider anthropic --model claude-sonnet-4-5
-```
-
-OpenAI 直接走 Chat Completions：
-
-```bash
-export OPENAI_API_KEY=...
-go run ./cmd/xxx-code --provider openai --model gpt-4.1
-```
-
-`gpt` 只是 `openai` 的别名，方便直接按模型语义来选：
-
-```bash
-export OPENAI_API_KEY=...
-go run ./cmd/xxx-code --provider gpt --model gpt-4.1
-```
-
-如果你要接兼容的 OpenAI endpoint，也可以显式指定：
-
-```bash
-go run ./cmd/xxx-code \
-  --provider openai \
-  --base-url https://api.openai.com/v1 \
-  --model gpt-4.1
-```
-
-Azure OpenAI 走当前 v1 OpenAI-compatible base URL 方案：
-
-```bash
-export AZURE_OPENAI_API_KEY=...
-export AZURE_OPENAI_BASE_URL=https://YOUR-RESOURCE.openai.azure.com/openai/v1
-
-go run ./cmd/xxx-code \
-  --provider azure-openai \
-  --model YOUR_DEPLOYMENT_NAME
-```
-
-如果 `--base-url` 传的是 Azure 资源根地址，runtime 也会自动补 `/openai/v1`。
-
-Gemini 走 Google 官方 OpenAI-compatible 入口：
-
-```bash
-export GEMINI_API_KEY=...
-go run ./cmd/xxx-code --provider gemini --model gemini-2.5-pro
-```
-
-MiniMax 走官方 OpenAI-compatible 入口：
-
-```bash
-export MINIMAX_API_KEY=...
-go run ./cmd/xxx-code --provider minimax --model MiniMax-M2.5
-```
-
-GLM 走智谱官方 Coding OpenAI-compatible 端点：
-
-```bash
-export ZHIPUAI_API_KEY=...
-go run ./cmd/xxx-code --provider glm --model glm-4.5
-```
-
-默认 base URL 如下，必要时都可以用 `--base-url` 覆盖：
-
-- `openai` / `gpt`: `https://api.openai.com/v1`
-- `azure-openai`: 需要你自己的 Azure 资源地址
-- `gemini`: `https://generativelanguage.googleapis.com/v1beta/openai`
-- `minimax`: `https://api.minimaxi.com/v1`
-- `glm`: `https://open.bigmodel.cn/api/coding/paas/v4`
-
-目前这些 provider 都已经接进同一套 tool-calling 主循环；OpenAI-compatible 家族也支持流式文本输出与工具调用增量拼装。
-
-如果你想直接从模板起步，也可以：
-
-```bash
-go run ./cmd/xxx-code --config examples/gemini.yaml
-go run ./cmd/xxx-code --config examples/minimax.yaml
-go run ./cmd/xxx-code --config examples/glm.yaml
-```
-
-## 交互模式
-
-```bash
-cd xxx-code
+export ANTHROPIC_API_KEY=your-key
 go run ./cmd/xxx-code
 ```
 
-REPL 内支持：
+进入 REPL 后，你可以直接输入：
 
-- `:help`
-- `:agents`
-- `:workflows`
-- `:workflow <workflow-id>`
-- `:workflow-tasks <workflow-id> [status|name=<task>]`
-- `:workflow-resume <workflow-id> [failed|task...]`
-- `:plugins`
-- `:plugins-validate <path>`
-- `:plugins-install <path> [force]`
-- `:plugins-remove <name>`
-- `:plugins-reload`
-- `:mcp`
-- `:mcp-health [server]`
-- `:mcp-reload`
-- `:mcp-validate [path]`
-- `:mcp-resources [server]`
-- `:mcp-resource-templates [server]`
-- `:mcp-prompts [server]`
-- `:mcp-read <server> <uri>`
-- `:mcp-prompt <server> <name> [key=value ...]`
-- `:wait <agent-id>`
-- `:wait-all [agent-id ...]`
-- `:send <agent-id> <prompt>`
-- `:cancel <agent-id>`
-- `:history [n]`
-- `:audit [n]`
-- `:compact`
-- `:policy`
-- `:hooks`
-- `:save`
-- `:session`
-- `:quit`
+```text
+分析当前仓库里 xxx-code 的配置系统是怎么实现的
+```
 
-如果你更想用一个更像“终端应用”的界面，而不是逐行 REPL，也可以直接开 TUI：
+### 方式 2：单次执行
+
+适合脚本化场景：
+
+```bash
+go run ./cmd/xxx-code --print "分析当前目录的 Go 模块依赖关系"
+```
+
+也可以直接把 prompt 作为最后一个参数，程序会自动进入单次执行模式：
+
+```bash
+go run ./cmd/xxx-code "找出当前仓库里所有 daemon 相关入口"
+```
+
+### 方式 3：本地 TUI
 
 ```bash
 go run ./cmd/xxx-code --tui
 ```
 
-当前 TUI 提供：
+适合连续工作、长会话和流式输出观察。
 
-- 滚动 transcript 视图
-- 流式 assistant 输出
-- 底部输入框
-- 侧边栏 session / agent / workflow / MCP 状态
-- `Ctrl+S` 保存、`Ctrl+L` 清屏、`Ctrl+O` 开关侧边栏、`Ctrl+C` 退出
+### 方式 4：daemon + remote
 
-## 单次执行
+先在一台机器上启动 daemon：
 
 ```bash
-go run ./cmd/xxx-code --print "分析当前目录的 Go 项目结构并给出修改建议"
+export ANTHROPIC_API_KEY=your-key
+go run ./cmd/xxx-code --daemon --listen 127.0.0.1:7331
 ```
 
-如果你想关闭主会话的增量输出，也可以显式关掉：
-
-```bash
-go run ./cmd/xxx-code --stream=false
-```
-
-## Daemon 模式
-
-如果你想把 `xxx-code` 当成一个常驻的远程 agent runtime，而不是只在本地 REPL 里用，可以直接启动 daemon：
-
-```bash
-go run ./cmd/xxx-code \
-  --daemon \
-  --listen 127.0.0.1:7331
-```
-
-如果你要把 daemon 暴露给别的机器、别的服务，建议至少打开 bearer token：
-
-```bash
-go run ./cmd/xxx-code \
-  --daemon \
-  --listen 127.0.0.1:7331 \
-  --daemon-token dev-secret
-```
-
-如果你更想把 token 放在文件里，并且支持不重启 daemon 的轮换，可以改成：
-
-```bash
-go run ./cmd/xxx-code \
-  --daemon \
-  --listen 127.0.0.1:7331 \
-  --daemon-token-file .secrets/daemon-token.txt
-```
-
-如果你还希望 daemon 自带基础治理能力，可以再加上审计、ACL 和限流：
-
-```bash
-go run ./cmd/xxx-code \
-  --daemon \
-  --listen 127.0.0.1:7331 \
-  --daemon-token dev-secret \
-  --daemon-audit-file .xxx-code/daemon/audit.jsonl \
-  --daemon-allow-modes sessions_read,sessions_write,turns,introspection,plugins,mcp,agents,workflows,audit \
-  --daemon-allow-session-prefix team- \
-  --daemon-rate-limit-per-minute 120 \
-  --daemon-rate-limit-burst 20
-```
-
-这些参数的含义分别是：
-
-- `daemon_audit_file`: 以 JSONL 方式落审计记录
-- `daemon_allow_modes / daemon_deny_modes`: 控制哪些 API 面可以调
-- `daemon_allow_session_prefix / daemon_deny_session_prefix`: 控制哪些 session ID 前缀可访问
-- `daemon_rate_limit_per_minute / daemon_rate_limit_burst`: 控制每个 client address 的请求速率
-- `daemon_token_file`: 从文件读取一个或多个 bearer token，并在每次请求时重新读取，支持轮换
-
-daemon 会把远程 session 存到：
-
-```text
-.xxx-code/daemon/sessions/
-```
-
-也可以显式改目录：
-
-```bash
-go run ./cmd/xxx-code \
-  --daemon \
-  --daemon-dir /tmp/xxx-code-daemon
-```
-
-目前内置的是一套简单 JSON API，比较常用的入口有：
-
-- `GET /healthz`
-- `GET /v1/audit?limit=50`
-- `GET /v1/sessions`
-- `POST /v1/sessions`
-- `GET /v1/sessions/{id}`
-- `GET /v1/sessions/{id}/messages?limit=20`
-- `GET /v1/sessions/{id}/audit?limit=50`
-- `POST /v1/sessions/{id}/turns`
-- `POST /v1/sessions/{id}/turns/stream`
-- `GET /v1/sessions/{id}/policy`
-- `GET /v1/sessions/{id}/hooks`
-- `GET /v1/sessions/{id}/plugins`
-- `POST /v1/sessions/{id}/plugins/validate`
-- `POST /v1/sessions/{id}/plugins/install`
-- `POST /v1/sessions/{id}/plugins/remove`
-- `POST /v1/sessions/{id}/plugins/reload`
-- `GET /v1/sessions/{id}/mcp`
-- `GET /v1/sessions/{id}/mcp/health?server=name`
-- `POST /v1/sessions/{id}/mcp/reload`
-- `POST /v1/sessions/{id}/mcp/validate`
-- `GET /v1/sessions/{id}/mcp/resources?server=name`
-- `GET /v1/sessions/{id}/mcp/resource-templates?server=name`
-- `GET /v1/sessions/{id}/mcp/prompts?server=name`
-- `POST /v1/sessions/{id}/mcp/read-resource`
-- `POST /v1/sessions/{id}/mcp/get-prompt`
-- `GET /v1/sessions/{id}/agents`
-- `POST /v1/sessions/{id}/agents/{agent_id}/send`
-- `POST /v1/sessions/{id}/agents/{agent_id}/cancel`
-- `POST /v1/sessions/{id}/agents/{agent_id}/wait`
-- `GET /v1/sessions/{id}/workflows`
-- `GET /v1/sessions/{id}/workflows/{workflow_id}`
-- `GET /v1/sessions/{id}/workflows/{workflow_id}/tasks?status=failed`
-- `POST /v1/sessions/{id}/workflows/{workflow_id}/resume`
-
-例如新建一个远程 session：
-
-```bash
-curl -s http://127.0.0.1:7331/v1/sessions -X POST
-```
-
-如果 daemon 开了 token，就把 `Authorization` 一起带上：
-
-```bash
-curl -s http://127.0.0.1:7331/v1/sessions \
-  -X POST \
-  -H 'Authorization: Bearer dev-secret'
-```
-
-然后驱动它跑一轮：
-
-```bash
-curl -s http://127.0.0.1:7331/v1/sessions/<id>/turns \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"分析当前目录代码结构"}'
-```
-
-这样别的服务、脚本或上层 orchestrator 就可以把 `xxx-code` 当作一个远程 agent backend 去调。
-
-如果你想让远程 turn 也边生成边输出，可以直接调用 SSE 版本：
-
-```bash
-curl -N http://127.0.0.1:7331/v1/sessions/<id>/turns/stream \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"分析当前目录代码结构"}'
-```
-
-daemon 现在会为每个请求生成或透传：
-
-- `X-Trace-ID`
-
-打开 `--log-level=debug` 后，请求日志里会带上：
-
-- trace id
-- method / path
-- status
-- duration
-- remote addr
-
-如果开启了 `daemon_audit_file`，daemon 还会额外把这些事件追加到 JSONL audit log：
-
-- request 完成记录
-- auth failure
-- ACL deny
-- rate limit deny
-- tool call / tool result
-- policy block
-- agent 生命周期事件
-
-## Remote Bridge 模式
-
-如果 daemon 已经跑起来，本地这个 CLI 也可以直接把它当成“远程后端”来用，而不是自己再起一个本地 provider/runtime：
+再在本地连接它：
 
 ```bash
 go run ./cmd/xxx-code \
   --remote-url http://127.0.0.1:7331 \
-  --remote-list-sessions
+  --remote-session demo
 ```
 
-直接连到一个已有或自动创建的远程 session：
+或者直接用 remote TUI：
 
 ```bash
 go run ./cmd/xxx-code \
   --remote-url http://127.0.0.1:7331 \
-  --remote-session repo-main
-```
-
-远程 daemon 也可以直接进 TUI：
-
-```bash
-go run ./cmd/xxx-code \
-  --remote-url http://127.0.0.1:7331 \
-  --remote-session repo-main \
+  --remote-session demo \
   --tui
 ```
 
-如果远端 daemon 开了 token，就再加上：
+## 配置方式
+
+### 配置优先级
+
+优先级从低到高：
+
+1. 内建默认值
+2. 配置文件
+3. 环境变量
+4. CLI flags
+
+### 默认自动发现的文件
+
+`xxx-code` 会自动尝试发现：
+
+- `.xxx-code/config.yaml`
+- `.xxx-code/config.yml`
+- `.xxx-code/config.json`
+
+推荐使用 YAML。
+
+### 推荐目录布局
+
+```text
+your-project/
+  .xxx-code/
+    config.yaml
+    session.json
+    daemon/
+    artifacts/
+    hooks/
+    plugins/
+```
+
+### 示例模板
+
+仓库里已经提供了完整模板：
+
+- [examples/config.yaml](./examples/config.yaml)
+- [examples/anthropic.yaml](./examples/anthropic.yaml)
+- [examples/openai.yaml](./examples/openai.yaml)
+- [examples/gpt.yaml](./examples/gpt.yaml)
+- [examples/azure-openai.yaml](./examples/azure-openai.yaml)
+- [examples/gemini.yaml](./examples/gemini.yaml)
+- [examples/minimax.yaml](./examples/minimax.yaml)
+- [examples/glm.yaml](./examples/glm.yaml)
+- [examples/.env.example](./examples/.env.example)
+
+### 一个最小可用配置
+
+```yaml
+provider: anthropic
+model: claude-sonnet-4-5
+cwd: .
+session_file: .xxx-code/session.json
+stream: true
+allow_read:
+  - .
+allow_write:
+  - .
+log_level: info
+```
+
+### 常用配置项
+
+| 字段 | 作用 |
+| --- | --- |
+| `provider` | 选择模型提供方 |
+| `model` | 模型名或 deployment 名 |
+| `cwd` | 工具和相对路径的工作目录 |
+| `session_file` | 主会话持久化文件 |
+| `mcp_config` | MCP 配置文件路径 |
+| `plugin_dir` | 插件目录 |
+| `stream` | 是否流式输出模型文本 |
+| `max_turns` | 单次 prompt 最大 agent turn 数 |
+| `max_tokens` | 单次模型请求最大输出 token |
+| `context_budget` | 触发自动 compact 的近似上下文预算 |
+| `compact_keep` | compact 时保留的最近消息数 |
+| `max_parallel_agents` | 子 agent 最大并发数 |
+| `allow_read` | 允许读取的根目录列表 |
+| `allow_write` | 允许写入的根目录列表 |
+| `allow_tools` | 工具 allowlist |
+| `deny_tools` | 工具 denylist |
+| `allow_bash_prefix` | 允许的 bash 命令前缀 |
+| `deny_bash_prefix` | 拒绝的 bash 命令前缀 |
+| `hook_before_tool` | 每次 tool call 前执行的 shell hook |
+| `hook_after_tool` | 每次 tool call 后执行的 shell hook |
+| `hook_after_turn` | 每次 turn 后执行的 shell hook |
+| `hook_agent_event` | agent 生命周期事件 hook |
+| `hook_event_file` | JSONL hooks 事件输出文件 |
+| `log_level` | `error / info / debug` |
+| `log_file` | 日志落盘位置 |
+
+### 重要环境变量
+
+通用：
+
+- `XXX_CODE_PROVIDER`
+- `XXX_CODE_API_KEY`
+- `XXX_CODE_BASE_URL`
+- `XXX_CODE_MODEL`
+- `XXX_CODE_CONFIG`
+- `XXX_CODE_LOG_LEVEL`
+- `XXX_CODE_LOG_FILE`
+- `XXX_CODE_MCP_CONFIG`
+- `XXX_CODE_PLUGIN_DIR`
+- `XXX_CODE_HOOK_EVENT_FILE`
+
+provider 相关：
+
+- `ANTHROPIC_API_KEY`
+- `OPENAI_API_KEY`
+- `AZURE_OPENAI_API_KEY`
+- `AZURE_OPENAI_BASE_URL`
+- `GEMINI_API_KEY`
+- `MINIMAX_API_KEY`
+- `GLM_API_KEY`
+- `ZHIPUAI_API_KEY`
+- `BIGMODEL_API_KEY`
+- `ZAI_API_KEY`
+
+daemon / remote 相关：
+
+- `XXX_CODE_DAEMON_TOKEN`
+- `XXX_CODE_DAEMON_TOKEN_FILE`
+- `XXX_CODE_REMOTE_URL`
+- `XXX_CODE_REMOTE_TOKEN`
+- `XXX_CODE_REMOTE_TOKEN_FILE`
+- `XXX_CODE_REMOTE_SESSION`
+- `XXX_CODE_DAEMON_AUDIT_FILE`
+
+## 内建工具与扩展工具
+
+### 内建工具
+
+内建工具主要分 4 类：
+
+1. 文件工具  
+   用来读写文件、搜索代码、做最基本的代码修改。
+
+2. shell 工具  
+   用来执行命令、跑测试、调用现有脚本。
+
+3. agent 工具  
+   用来启动、等待、继续、取消子 agent。
+
+4. workflow 工具  
+   用来处理 fanout workflow 的查询和恢复。
+
+### MCP 动态工具
+
+MCP server 连接后，远端暴露的 tool 会被桥接成：
+
+```text
+mcp__<server>__<tool>
+```
+
+同时系统还会自动补充一组 MCP 管理工具：
+
+- `list_mcp_resources`
+- `list_mcp_resource_templates`
+- `read_mcp_resource`
+- `list_mcp_prompts`
+- `get_mcp_prompt`
+- `mcp_health`
+- `mcp_reload`
+- `mcp_validate`
+
+### 插件动态工具
+
+插件目录里的 manifest 会被桥接成：
+
+```text
+plugin__<plugin>__<tool>
+```
+
+同时系统会提供插件管理工具：
+
+- `list_plugins`
+- `validate_plugin`
+- `install_plugin`
+- `remove_plugin`
+- `reload_plugins`
+
+## MCP 使用方式
+
+默认会读取工作目录下的 `.mcp.json`。
+
+一个最小示例：
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["./mcp-docs-server.js"]
+    },
+    "browser": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+支持的 transport：
+
+- `stdio`
+- `http`
+- `sse`
+- `ws`
+
+常见用法：
+
+- `:mcp` 查看状态
+- `:mcp-health` 做在线探活
+- `:mcp-reload` 热重载配置
+- `:mcp-resources` / `:mcp-prompts` 查看 MCP 暴露的数据面
+
+## 插件使用方式
+
+插件默认目录是：
+
+```text
+.xxx-code/plugins
+```
+
+插件 manifest 可以叫：
+
+- `plugin.json`
+- `*.plugin.json`
+
+一个最小插件示例：
+
+```json
+{
+  "name": "review-tools",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "lint_summary",
+      "description": "Run lint and summarize the result",
+      "command": "./scripts/lint-summary.sh"
+    }
+  ]
+}
+```
+
+常见命令：
+
+- `:plugins`
+- `:plugins-validate <path>`
+- `:plugins-install <path>`
+- `:plugins-remove <name>`
+- `:plugins-reload`
+
+## multi-agent 与 workflow
+
+`xxx-code` 的 multi-agent 不是装饰性功能，而是非常核心的一层能力。
+
+### 子 agent 能做什么
+
+- 把主任务拆成可并行处理的子问题
+- 在独立上下文中运行，不污染主会话
+- 支持后台运行
+- 支持等待、继续、取消、列出状态
+
+### workflow 能做什么
+
+`agent_fanout` 可以一次发起一批任务，并支持：
+
+- `depends_on`
+- `max_parallel`
+- `resource_limits`
+- `fail_fast`
+- `preempt_lower_priority`
+- `retries`
+- `timeout_seconds`
+
+同时支持在下游 prompt 中引用上游任务结果，例如：
+
+```text
+{{tasks.scan_backend.result}}
+{{tasks.scan_backend.status}}
+```
+
+workflow 运行过程中会产生持久化快照与 artifact，便于恢复和排障。
+
+artifact 默认会写到：
+
+```text
+.xxx-code/artifacts/workflows/<workflow-id>/
+```
+
+## 持久化、恢复与状态文件
+
+### 默认状态文件
+
+- 主 session：`.xxx-code/session.json`
+- daemon 目录：`.xxx-code/daemon`
+- workflow artifacts：`.xxx-code/artifacts/workflows`
+- hooks 事件：`.xxx-code/hooks/events.jsonl`
+
+### `--resume`
+
+本地模式下，`--resume` 会从 `session_file` 恢复：
+
+- 主会话 transcript
+- 已知 agent 状态
+- workflow 快照
+
+这让长任务、长对话和中断恢复都更自然。
+
+### workflow resume
+
+除了整个 session 恢复之外，还支持：
+
+- 恢复整个 workflow
+- 只恢复失败任务
+- 只恢复指定任务
+
+对应工具：
+
+- `workflow_resume`
+
+对应 REPL 命令：
+
+- `:workflow-resume <id>`
+
+## 权限、安全与治理
+
+### 本地权限策略
+
+运行时权限主要体现在这些地方：
+
+- `allow_read`
+- `allow_write`
+- `read_only`
+- `allow_tools`
+- `deny_tools`
+- `allow_bash_prefix`
+- `deny_bash_prefix`
+- `bash`
+
+如果你想把它限制成“只能读代码、不能改文件、不能执行任意命令”，可以这样：
 
 ```bash
 go run ./cmd/xxx-code \
-  --remote-url http://127.0.0.1:7331 \
-  --remote-token dev-secret \
-  --remote-session repo-main
+  --read-only \
+  --bash=false \
+  --allow-read .
 ```
 
-如果你也想让 remote bridge 跟着 secret 文件自动切换 token，可以改成：
+### daemon 安全能力
 
-```bash
-go run ./cmd/xxx-code \
-  --remote-url http://127.0.0.1:7331 \
-  --remote-token-file .secrets/daemon-token.txt \
-  --remote-session repo-main
-```
+daemon 侧提供：
 
-或者单次远程执行一轮：
+- bearer token
+- token file 热轮换
+- API mode ACL
+- session prefix ACL
+- request rate limit
+- JSONL audit log
 
-```bash
-go run ./cmd/xxx-code \
-  --remote-url http://127.0.0.1:7331 \
-  --remote-session repo-main \
-  --print "分析当前目录代码结构"
-```
+更多部署建议见：
 
-## 诊断日志
+- [docs/daemon-deployment.md](./docs/daemon-deployment.md)
 
-如果你想把 stderr 和调试日志一起持久化到文件：
+## 本地 REPL 常用命令
 
-```bash
-go run ./cmd/xxx-code \
-  --log-level debug \
-  --log-file .xxx-code/xxx-code.log
-```
-
-daemon 模式也一样：
-
-```bash
-go run ./cmd/xxx-code \
-  --daemon \
-  --listen 127.0.0.1:7331 \
-  --log-level debug \
-  --log-file .xxx-code/daemon.log
-```
-
-## 发布
-
-本仓库已经补了：
-
-- [/.goreleaser.yml](/Users/tt/goworkspace/src/x-agent/.goreleaser.yml)
-- [xxx-code-release.yml](/Users/tt/goworkspace/src/x-agent/.github/workflows/xxx-code-release.yml)
-
-CI 会跑：
-
-- `gofmt`
-- `go test ./...`
-- `go test -race ./...`
-- `go run ./cmd/xxx-code --version`
-
-release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和 `checksums.txt`。
-
-远程 REPL 当前支持这些命令：
+启动本地 REPL 后，可用：
 
 - `:help`
+- `:agents`
+- `:workflows`
+- `:workflow <id>`
+- `:workflow-tasks <id> [status|name=<task>]`
+- `:workflow-resume <id> [failed|task...]`
+- `:plugins`
+- `:plugins-validate <path>`
+- `:plugins-install <path> [force]`
+- `:plugins-remove <name>`
+- `:plugins-reload`
+- `:mcp`
+- `:mcp-health [server]`
+- `:mcp-reload`
+- `:mcp-validate [path]`
+- `:mcp-resources [server]`
+- `:mcp-resource-templates [server]`
+- `:mcp-prompts [server]`
+- `:mcp-read <server> <uri>`
+- `:mcp-prompt <server> <name> [k=v ...]`
+- `:wait <agent-id>`
+- `:wait-all [agent-id ...]`
+- `:send <agent-id> <prompt>`
+- `:cancel <agent-id>`
+- `:history [n]`
+- `:compact`
+- `:policy`
+- `:hooks`
+- `:save`
+- `:session`
+
+## remote REPL 常用命令
+
+连接 daemon 后，可用：
+
 - `:session`
 - `:history [n]`
 - `:audit [n]`
@@ -629,7 +896,7 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:mcp-resource-templates [server]`
 - `:mcp-prompts [server]`
 - `:mcp-read <server> <uri>`
-- `:mcp-prompt <server> <name> [key=value ...]`
+- `:mcp-prompt <server> <name> [k=v ...]`
 - `:policy`
 - `:hooks`
 - `:agents`
@@ -641,587 +908,235 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:workflow-tasks <id> [status|name=<task>]`
 - `:workflow-resume <id> [failed|task...]`
 - `:save`
-- `:quit`
 
-这一路径下，本地 CLI 不需要直接配置 `ANTHROPIC_API_KEY`，模型调用和 session 持久化都由 daemon 负责。
-如果 daemon 开了 `--daemon-token` 或 `--daemon-token-file`，remote bridge 会用 `--remote-token`、`--remote-token-file` 或环境变量里的对应值自动发 `Authorization: Bearer ...`。
+## daemon API 概览
 
-默认情况下，`--remote-url` 会沿用 `--stream=true`，所以远程单次执行和远程 REPL 也会边收到文本边打印；如果你更想等整轮结束后再输出，可以显式关掉：
+daemon 启动后，核心接口包括：
 
-```bash
-go run ./cmd/xxx-code \
-  --remote-url http://127.0.0.1:7331 \
-  --stream=false \
-  --print "分析当前目录代码结构"
-```
+- `GET /healthz`
+- `GET /v1/sessions`
+- `POST /v1/sessions`
+- `GET /v1/sessions/{id}`
+- `GET /v1/sessions/{id}/messages`
+- `POST /v1/sessions/{id}/turns`
+- `POST /v1/sessions/{id}/turns/stream`
+- `POST /v1/sessions/{id}/save`
+- `GET /v1/sessions/{id}/policy`
+- `GET /v1/sessions/{id}/hooks`
+- `GET /v1/sessions/{id}/agents`
+- `POST /v1/sessions/{id}/agents/{agent}/send`
+- `POST /v1/sessions/{id}/agents/{agent}/wait`
+- `POST /v1/sessions/{id}/agents/{agent}/cancel`
+- `GET /v1/sessions/{id}/workflows`
+- `GET /v1/sessions/{id}/audit`
+- `...` 以及 MCP / plugin 相关接口
 
-## Session 持久化与恢复
-
-默认 session 文件会写到当前工作目录下：
-
-```text
-.xxx-code/session.json
-```
-
-也可以显式指定：
-
-```bash
-go run ./cmd/xxx-code --session-file /path/to/session.json
-```
-
-恢复上一次主会话、已知子 agent 和已保存 workflow：
+一个最简单的 curl 例子：
 
 ```bash
-go run ./cmd/xxx-code --resume
+curl -s http://127.0.0.1:7331/v1/sessions
 ```
 
-如果某个子 agent 在 session 保存时仍处于运行中，恢复后会被标记为失败，需要重新发送任务。这是当前实现为了保持状态一致性做的显式处理。
-
-如果某个 `agent_fanout` workflow 在保存时还没跑完，恢复后会被标记成 `interrupted`，unfinished task 会回到可恢复状态。你可以用：
-
-```text
-:workflows
-:workflow <workflow-id>
-:workflow-tasks <workflow-id> failed
-:workflow-resume <workflow-id> failed
-:workflow-resume <workflow-id> planner writer
-```
-
-或者对应的工具：
-
-- `workflow_list`
-- `workflow_get`
-- `workflow_tasks`
-- `workflow_resume`
-
-如果配置了默认 artifact 目录，workflow 每次状态变化还会额外写出：
-
-```text
-.xxx-code/artifacts/workflows/<workflow-id>/
-  manifest.json
-  01_<task-name>.json
-  02_<task-name>.json
-```
-
-`manifest.json` 里会包含 workflow summary 和完整 task 列表；每个 task artifact 会记录当次 workflow 状态、task snapshot、错误信息和生成时间，方便后续排障或作为更高层 orchestrator 的结果索引。
-
-## 自动上下文压缩
-
-`xxx-code` 会在会话上下文接近预算时自动压缩较早的消息，把旧消息折叠成一条 summary，同时保留最近若干条消息原样传给模型。
-
-默认参数：
-
-```text
-context-budget = 120000
-compact-keep   = 12
-```
-
-可以调整：
+如果 daemon 开了 bearer token：
 
 ```bash
-go run ./cmd/xxx-code \
-  --context-budget 80000 \
-  --compact-keep 10
+curl -s \
+  -H "Authorization: Bearer $(cat .secrets/daemon-token.txt)" \
+  http://127.0.0.1:7331/v1/sessions
 ```
 
-也可以在 REPL 里手动执行一次：
+流式执行一个 turn：
+
+```bash
+curl -N \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat .secrets/daemon-token.txt)" \
+  -d '{"prompt":"分析当前 session 的 workflow 状态"}' \
+  http://127.0.0.1:7331/v1/sessions/demo/turns/stream
+```
+
+## 一些典型使用例子
+
+### 例子 1：把它当成本地代码副驾
+
+```bash
+go run ./cmd/xxx-code
+```
+
+然后输入：
 
 ```text
-:compact
+分析这个仓库里 daemon、remote、engine 三层的关系，并告诉我从哪里开始看代码最合适
 ```
 
-当前的 budget 是近似 token 估算，不是 provider 返回的精确上下文计数，但已经足够拿来做稳定的长会话保护。
+适合：
 
-## 权限策略
+- 新项目 onboarding
+- 梳理模块边界
+- 快速理解陌生代码库
 
-`xxx-code` 现在把工具权限也收进了 runtime，而不是完全放任工具自由访问本机。
+### 例子 2：一次性代码分析
 
-默认行为：
+```bash
+go run ./cmd/xxx-code --print "找出当前仓库里所有和 workflow resume 相关的代码入口"
+```
 
-- `read_file` / `glob` / `grep` 只允许读取工作目录及显式允许的 read roots
-- `write_file` / `edit_file` 只允许写入工作目录及显式允许的 write roots
-- `bash` 可以整体关闭
-- `--read-only` 会直接禁止写文件类工具
-- 可以按 tool 名做 allowlist / denylist
-- `bash` 还可以继续细化到命令前缀 allow / deny
+适合：
 
-常见用法：
+- 快速搜代码
+- shell 脚本里调用
+- CI 前置分析
+
+### 例子 3：限制权限，只让它读代码
 
 ```bash
 go run ./cmd/xxx-code \
   --read-only \
   --bash=false \
-  --allow-read ../shared-docs,/tmp/project-cache
+  --allow-read . \
+  --print "概括这个仓库的项目结构"
 ```
 
-或者：
+适合：
+
+- 只读审查
+- 安全敏感环境
+- 文档整理
+
+### 例子 4：让它跑成长时远程 agent
+
+在服务器上：
+
+```bash
+export ANTHROPIC_API_KEY=your-key
+go run ./cmd/xxx-code \
+  --daemon \
+  --listen 0.0.0.0:7331 \
+  --daemon-token-file .secrets/daemon-token.txt
+```
+
+在本地：
 
 ```bash
 go run ./cmd/xxx-code \
-  --allow-write ./generated,./reports
+  --remote-url http://server:7331 \
+  --remote-token-file .secrets/daemon-token.txt \
+  --remote-session team-backlog \
+  --tui
 ```
 
-或者把权限直接收得更细：
+适合：
 
-```bash
-go run ./cmd/xxx-code \
-  --allow-tools read_file,glob,grep,bash \
-  --deny-tools mcp__playwright__navigate \
-  --allow-bash-prefix "git status,go test,go list" \
-  --deny-bash-prefix "rm ,sudo "
-```
+- 固定工作机集中运行
+- 团队共享远程 session
+- 把 provider key 留在 daemon 侧
 
-这里的 `--allow-tools` / `--deny-tools` 既可以控内建 tool，也可以控动态 MCP tool；`bash` 的前缀策略则适合把“允许哪些命令族”收得更死。
+### 例子 5：接入 MCP 做外部操作
 
-REPL 里可以用 `:policy` 查看当前生效策略。
-
-## Hooks
-
-`xxx-code` 现在的 hooks 不再只是单点 shell command，而是一层可组合的事件总线。当前内置了两类 sink：
-
-- shell hooks
-- JSONL event file sink
-
-也就是说，你现在既可以继续跑 shell hook，也可以把同一批 hook event 同步落到文件里，给审计、编排或外部 agent 系统消费。
-
-可用 hook：
-
-- `--hook-before-tool`
-- `--hook-after-tool`
-- `--hook-after-turn`
-- `--hook-agent-event`
-- `--hook-event-file`
-
-hook 会把 JSON payload 写到命令的 stdin，同时注入这些环境变量：
-
-- `XXX_CODE_HOOK_KIND`
-- `XXX_CODE_AGENT_ID`
-- `XXX_CODE_AGENT_NAME`
-- `XXX_CODE_TOOL_NAME`
-- `XXX_CODE_STATUS`
-
-其中 `before_tool` hook 的命令如果非零退出，会阻止这次工具调用。
-
-如果你还配置了 `--hook-event-file`，每个 hook event 也会以 JSONL 形式追加到目标文件：
+当你配置好 `.mcp.json` 后，可以在 REPL 里直接让模型使用：
 
 ```text
-.xxx-code/hooks/events.jsonl
+读取 docs server 暴露的 API 设计说明，并帮我整理成一份改造清单
 ```
 
-示例：
+适合：
 
-```bash
-go run ./cmd/xxx-code \
-  --hook-before-tool 'cat > /tmp/xxx-before-tool.json' \
-  --hook-after-turn 'cat > /tmp/xxx-after-turn.json' \
-  --hook-event-file .xxx-code/hooks/events.jsonl
-```
+- 文档检索
+- 浏览器控制
+- 数据库读取
+- 内部知识系统接入
 
-REPL 里可以用 `:hooks` 查看当前配置。
+### 例子 6：用 workflow 并行拆任务
 
-## Plugins
-
-`xxx-code` 现在支持从插件目录加载命令型工具。默认会自动发现：
+你可以直接让模型自主拆分：
 
 ```text
-.xxx-code/plugins
+把“审查这个仓库的 provider、daemon、plugin 三块设计”拆成三个子 agent 并行处理，最后汇总一个结论
 ```
 
-也可以显式指定：
-
-```bash
-go run ./cmd/xxx-code --plugin-dir /path/to/plugins
-```
-
-插件 manifest 当前支持两种命名方式：
-
-- `<plugin-dir>/<name>/plugin.json`
-- `<plugin-dir>/**/*.plugin.json`
-
-一个最小可运行示例：
-
-```json
-{
-  "name": "echoer",
-  "version": "0.1.0",
-  "tools": [
-    {
-      "name": "echo",
-      "description": "Echo stdin JSON back to stdout",
-      "input_schema": {
-        "type": "object"
-      },
-      "command": "./tool.sh"
-    }
-  ]
-}
-```
-
-插件工具会自动桥接成：
-
-```text
-plugin__echoer__echo
-```
-
-也就是说，模型看到的仍然是一组普通 tools，不需要主循环做分叉。插件命令执行时会把 tool input JSON 写到 stdin，并注入这些环境变量：
-
-- `XXX_CODE_PLUGIN_NAME`
-- `XXX_CODE_PLUGIN_TOOL`
-- `XXX_CODE_WORKING_DIR`
-
-如果插件 stdout 直接输出文本，runtime 会把它当普通 tool result；如果 stdout 输出这种 JSON：
-
-```json
-{
-  "content": "done",
-  "is_error": false
-}
-```
-
-runtime 会按结构化 tool result 处理。
-
-本地 REPL 和 remote REPL 都支持：
-
-- `:plugins`
-- `:plugins-validate <path>`
-- `:plugins-install <path> [force]`
-- `:plugins-remove <name>`
-- `:plugins-reload`
-
-其中 `:plugins-validate` / `:plugins-install` 的 `path` 是 daemon 或本地进程所在机器上的路径，可以传插件目录，也可以直接传 manifest 文件。
-
-daemon API 对应是：
+也可以在更强控制场景下，显式让它使用 fanout workflow。
 
-- `GET /v1/sessions/{id}/plugins`
-- `POST /v1/sessions/{id}/plugins/validate`
-- `POST /v1/sessions/{id}/plugins/install`
-- `POST /v1/sessions/{id}/plugins/remove`
-- `POST /v1/sessions/{id}/plugins/reload`
+适合：
 
-同时模型侧还能直接用：
+- 大范围代码审查
+- 多模块并行分析
+- 复杂变更前的前置调研
 
-- `list_plugins`
-- `validate_plugin`
-- `install_plugin`
-- `remove_plugin`
-- `reload_plugins`
+### 例子 7：接插件跑内部脚本
 
-当前插件工具是“受信任扩展”模型。它们仍然会被 `--allow-tools / --deny-tools` 约束，但插件命令本身是宿主机进程，所以更适合放在你自己控制的目录和代码里。
+如果团队有现成脚本：
 
-## MCP
+- lint 汇总
+- 构建摘要
+- 发布说明生成
+- 内部查询工具
 
-`xxx-code` 现在会自动读取工作目录下的 `.mcp.json`，并把其中 `mcpServers` 里配置的 MCP server 动态注册成工具。目前支持四种 transport：`stdio`、`http`（streamable HTTP）、`sse` 和 `ws`。
+可以直接包成插件工具，让模型像调用内建工具一样调用它们。
 
-兼容的配置形态：
+### 例子 8：把 hooks 当事件总线
 
-```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["-y", "@playwright/mcp@latest"]
-    },
-    "remote_docs": {
-      "transport": "http",
-      "url": "https://example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${TOKEN}"
-      }
-    },
-    "legacy_sse": {
-      "type": "sse",
-      "url": "https://example.com/sse"
-    },
-    "legacy_ws": {
-      "transport": "ws",
-      "url": "wss://example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${TOKEN}"
-      }
-    }
-  }
-}
-```
-
-启动时会把这些远端工具映射成 `mcp__playwright__<tool>` 这种名字，所以它们会和内建 tools 一起出现在同一个 tool 集合里。
-
-除了远端 tools，这一版还把 MCP 的资源和 prompt 能力接进来了：
-
-- `list_mcp_resources`
-- `list_mcp_resource_templates`
-- `read_mcp_resource`
-- `list_mcp_prompts`
-- `get_mcp_prompt`
-
-也就是说，模型现在不仅能调 MCP server 的动作，还能枚举资源、读取资源内容，以及取回 prompt 模板消息。
+通过：
 
-也可以显式指定配置文件：
+- `hook_before_tool`
+- `hook_after_tool`
+- `hook_after_turn`
+- `hook_agent_event`
+- `hook_event_file`
 
-```bash
-go run ./cmd/xxx-code \
-  --mcp-config /path/to/.mcp.json
-```
+你可以把 agent 的运行过程同步到：
 
-REPL 里可以用这些命令做 MCP 管理：
+- shell 自动化
+- JSONL 日志处理器
+- 外部事件收集系统
 
-- `:mcp`
-- `:mcp-health [server]`
-- `:mcp-reload`
-- `:mcp-validate [path]`
+## 为什么它适合继续做 multi-agent 平台
 
-其中：
+如果你后续想把 `xxx-code` 不只是当成一个 CLI，而是继续发展成 multi-agent 平台，它已经具备很好的基础：
 
-- `:mcp` 看当前连接状态、transport、URL、已注册工具和 warning
-- `:mcp-health` 会对已连接 server 发 `ping`，回写 `healthy / last_checked_at / latency_millis`
-- `:mcp-reload` 会重新读取 `.mcp.json`，重连 server，并移除旧的动态工具桥接
-- `:mcp-validate` 会先做配置层校验，不要求当前 session 已经连上 MCP
+- agent 是系统内建能力，不是外挂脚本
+- workflow 有完整状态模型和 artifact
+- daemon 可以托管远程 session
+- remote bridge 已经打通
+- hooks、MCP、插件都可以继续扩
+- 权限、审计、恢复都已经进入 runtime 内核
 
-remote daemon 这边也提供了同一组 API：
+也就是说，它现在已经不只是“Go 版 Claude Code demo”，而是一个可以继续承载更大 agent 系统的底座。
 
-- `GET /v1/sessions/{id}/mcp`
-- `GET /v1/sessions/{id}/mcp/health?server=name`
-- `POST /v1/sessions/{id}/mcp/reload`
-- `POST /v1/sessions/{id}/mcp/validate`
+## 开发与验证
 
-远程 server 上配置的 `headers` 会透传到每个 HTTP 请求里，方便接鉴权代理或自定义网关。
-
-## Agent 调度
-
-`xxx-code` 现在支持子 agent 并发上限控制。超过上限的新 agent 不会直接并发运行，而是进入 `queued` 状态，等已有 agent 释放槽位后再继续执行。
-
-默认值：
-
-```text
-max-parallel-agents = 4
-```
-
-可以调整：
-
-```bash
-go run ./cmd/xxx-code \
-  --max-parallel-agents 2
-```
-
-`agent_list` 和 `:agents` 都会显示 `queued / running / idle / failed / cancelled` 这些状态。
-
-排队 agent 现在还支持 `priority`。当并发槽位满了以后，优先级更高的任务会先启动；同优先级下保持先进先出。`agent_spawn` 和 `agent_fanout.tasks[]` 都支持传这个字段。
-
-示例：
-
-```json
-{
-  "name": "reviewer",
-  "prompt": "优先检查回归风险",
-  "priority": 10,
-  "background": true
-}
-```
-
-## 批量编排
-
-现在还补了两组更适合 multi-agent orchestration 的原语：
-
-- `agent_fanout`: 一次起一批子 agent，可选 `wait=true` 直接回收整批结果
-- `agent_wait`: 除了单个 `agent_id`，现在也支持 `agent_ids` 数组和 `all=true`
-
-示例：
-
-```json
-{
-  "max_parallel": 2,
-  "resource_limits": {"browser": 1},
-  "fail_fast": true,
-  "preempt_lower_priority": true,
-  "tasks": [
-    {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4, "retries": 1},
-    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8, "resource": "browser", "timeout_seconds": 30},
-    {
-      "name": "writer",
-      "prompt": "基于 {{tasks.reader.result}} 和 {{tasks.tester.result}} 输出结论",
-      "depends_on": ["reader", "tester"]
-    }
-  ],
-  "wait": true
-}
-```
-
-`depends_on` 会按任务名建立依赖图。前置任务成功后，下游任务才会启动；如果前置任务失败或取消，下游任务会被标记成 `skipped`，不会继续消耗 agent 槽位。为了保证这个编排过程可控，带依赖的 fanout 目前要求 `wait=true`。
-
-下游 prompt 里还可以显式引用上游任务字段：
-
-- `{{tasks.<name>.result}}`
-- `{{tasks.<name>.status}}`
-- `{{tasks.<name>.error}}`
-- `{{tasks.<name>.agent_id}}`
-
-这些引用必须同时满足两点：目标任务有 `name`，并且当前任务在 `depends_on` 里显式声明了这个依赖。执行结果里也会返回 `tasks[].resolved_prompt`，方便你调试真实下发给子 agent 的 prompt。
-
-如果你希望单个 workflow 不要把全局 agent 槽位全吃满，可以在 `agent_fanout` 里加 `max_parallel` 做局部并发上限。再往上，如果你希望任一任务失败后尽快止损，可以加 `fail_fast=true`：
-
-- 已经启动的 sibling task 会被取消，状态变成 `cancelled`
-- 还没启动的 sibling task 会被标记成 `skipped`
-
-每个 task 还支持两组更偏执行层的控制：
-
-- `retries`: 失败、取消或超时后自动重试的次数
-- `timeout_seconds`: 单任务超时，超时后对应 agent 会被取消，task 状态记成 `timed_out`
-
-`fail_fast` 会等某个任务把自己的重试次数耗尽后再真正触发，所以它和 `retries` 可以组合使用。带这些执行控制的 workflow 同样要求 `wait=true`，因为需要由编排器负责调度和回收。
-
-如果 workflow 里有某类任务不适合并发跑，还可以给 task 打上 `resource`，再用 `resource_limits` 做资源池限流。例如上面的 `"browser": 1` 就表示同一时刻最多只跑一个 `resource="browser"` 的任务；其它不在这个资源池里的任务不受影响。
-
-如果你还希望高优先级任务能“插队”，可以加 `preempt_lower_priority=true`。这时高优先级 task 在被 `max_parallel` 或 `resource_limits` 挡住时，会尝试取消已经运行中的更低优先级 task，先让高优先级任务跑完；被抢占的低优先级 task 后面会重新排回去继续执行。执行结果里的 `tasks[].preemptions` 会记录它被抢占了多少次。
-
-带编排控制的 `agent_fanout` 现在还会返回一个 `workflow.id`。这个 workflow 会跟着 session 一起保存，所以如果中途退出，你可以在 `--resume` 之后继续查看或恢复，而不用手工重新拼整张 DAG。
-
-如果你只想重跑失败节点，可以在 `workflow_resume` 里传 `only_failed=true`；如果你已经知道要从哪几个节点开始，也可以传 `task_names`。runtime 会自动把这些节点的 downstream dependents 一起重置成可运行状态：
-
-```json
-{
-  "workflow_id": "workflow_123",
-  "only_failed": true
-}
-```
-
-或者：
-
-```json
-{
-  "workflow_id": "workflow_123",
-  "task_names": ["planner", "writer"]
-}
-```
-
-配合 `workflow_tasks` 的状态过滤：
-
-```json
-{
-  "workflow_id": "workflow_123",
-  "status": "failed"
-}
-```
-
-上层 orchestrator 就可以先查出失败节点，再选择性地恢复，而不需要整张 DAG 从头重跑。
-
-这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
-
-## Daemon 治理
-
-daemon 审计日志默认会写到：
-
-```text
-.xxx-code/daemon/audit.jsonl
-```
-
-每一行都是一条独立 JSON 事件，适合直接配合 `jq`、`rg`、日志采集器或后续 SIEM 管道消费。现在支持两种查询入口：
-
-- `GET /v1/audit?limit=50`
-- `GET /v1/sessions/{id}/audit?limit=50`
-
-其中 session 级 audit 更适合排一个具体任务或 workflow；全局 audit 更适合查 auth failure、ACL deny 和速率限制。
-
-## Token 轮换与部署
-
-`daemon_token_file` 和 `remote_token_file` 都支持几种格式：
-
-- 单个纯文本 token
-- 多行 token
-- 逗号分隔 token
-- JSON string
-- JSON array
-- JSON object，例如 `{"token":"..."}`
-  或 `{"tokens":["new","old"]}`
-
-推荐的轮换方式是：
-
-1. 先把 daemon token file 写成 `["new-token","old-token"]`
-2. 更新 remote/client 侧 token file，让它开始发送 `new-token`
-3. 确认新 token 全部生效后，把 daemon token file 收敛成 `["new-token"]`
-
-这套方式不需要重启 daemon，因为服务端和 remote bridge 都会在每次请求时重新读取 token file。
-
-部署上建议遵守这几个最小原则：
-
-- daemon 继续只监听 `127.0.0.1`，除非你真的需要跨机访问
-- 对外暴露时优先放在 TLS reverse proxy 后面，而不是直接把 daemon 端口暴露到公网
-- bearer token 放在受限权限的 secret 文件里，例如 `0600`
-- 生产环境优先走内网、SSH tunnel、Tailscale 或反向代理，不要把裸 `/v1/*` API 直接暴露到互联网
-
-更完整的部署建议见：
-
-- [daemon-deployment.md](/Users/tt/goworkspace/src/x-agent/xxx-code/docs/daemon-deployment.md)
-
-## 常用参数
-
-```bash
-go run ./cmd/xxx-code \
-  --model claude-sonnet-4-5 \
-  --max-turns 12 \
-  --max-parallel-agents 4 \
-  --tool-timeout 2m \
-  --hook-timeout 30s \
-  --context-budget 120000 \
-  --compact-keep 12 \
-  --stream=false \
-  --cwd /path/to/project \
-  --mcp-config /path/to/project/.mcp.json \
-  --allow-read ../shared-docs \
-  --allow-write ./generated \
-  --allow-tools read_file,glob,grep,bash \
-  --allow-bash-prefix "git status,go test" \
-  --daemon-audit-file .xxx-code/daemon/audit.jsonl \
-  --daemon-allow-modes sessions_read,sessions_write,turns,introspection,plugins,mcp,agents,workflows,audit \
-  --daemon-rate-limit-per-minute 120 \
-  --resume \
-  --session-file /path/to/project/.xxx-code/session.json \
-  --print "实现一个功能"
-```
-
-## 设计重点
-
-### 1. 统一执行内核
-
-主线程和子 agent 复用同一个 `Runner` 主循环：
-
-- 发送 messages 给模型
-- 解析 `text` / `tool_use`
-- 执行工具
-- 回写 `tool_result`
-- 继续下一轮直到没有工具调用
-
-### 2. Multi-agent 是真正的私有会话
-
-`agent_spawn` 创建的是一个带独立 session 的 agent，而不是随便拼一个 prompt 分支：
-
-- 独立消息历史
-- 可选继承父会话历史
-- 可以后台执行
-- 可以被 `agent_send` 继续驱动
-- 可以被 `agent_wait` / `agent_list` 管理
-- 可以被持久化并在之后恢复
-
-这让 `xxx-code` 更适合作为后续 Go 版 multi-agent runtime 的基础。
-
-### 3. 自动保存优先于“一次性脚本感”
-
-主会话在成功完成一轮后自动保存，子 agent 在 spawn / 完成时也会自动保存；workflow 状态变化时也会一起落盘。这样即便是 REPL 模式，也更接近真正可持续协作的 agent，而不是临时命令行包装器。
-
-### 4. 长上下文管理不是完全交给外部模型
-
-除了 session 持久化，runtime 自己也会做 context budget 管理。这样 agent 和子 agent 都能在更长时间尺度上持续工作，而不会因为 transcript 线性膨胀就很快失控。
-
-### 5. MCP 也走统一 Tool 抽象
-
-MCP server 并不是旁路插件系统，而是启动时桥接进同一个 registry。对模型来说，它看到的只是额外多了一批 `mcp__server__tool`，所以主循环、hooks、multi-agent 协作都不需要分叉实现。
-
-### 6. 依赖仍然尽量轻
-
-除 Anthropic HTTP 适配外，新增的 MCP 能力也只引入了官方 Go SDK，没有把 runtime 绑到更重的框架里，后面继续做嵌入式 multi-agent runtime 还比较顺手。
-
-## 测试
+常用检查：
 
 ```bash
 go test ./...
+go test -race ./...
+go test -cover ./...
 ```
 
-现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期、远程 API 和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。
+查看版本：
+
+```bash
+go run ./cmd/xxx-code --version
+```
+
+## 相关文档
+
+- [ROADMAP.md](./ROADMAP.md)
+- [docs/daemon-deployment.md](./docs/daemon-deployment.md)
+- [examples/config.yaml](./examples/config.yaml)
+- [examples/.env.example](./examples/.env.example)
+
+## 当前状态
+
+当前这条主线已经不是“还缺一个大功能才能用”，而是进入了“作为 agent runtime 持续打磨”的阶段。
+
+换句话说：
+
+- 本地可用
+- 远程可用
+- 多 agent 可用
+- workflow 可用
+- 扩展能力可用
+- 治理能力可用
+
+后面如果继续往下做，重点会更多落在生态、协作体验和更高层的 agent 编排模型上。
