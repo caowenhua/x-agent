@@ -39,7 +39,8 @@ type toolCallDeltaChunk struct {
 }
 
 type streamAccumulator struct {
-	response responsePayload
+	response   responsePayload
+	textFilter reasoningFilter
 }
 
 func (c *Client) CreateMessageStream(ctx context.Context, request engine.CompletionRequest, handle func(engine.StreamEvent)) (engine.CompletionResponse, error) {
@@ -72,6 +73,12 @@ func (c *Client) CreateMessageStream(ctx context.Context, request engine.Complet
 				if accumulator.response.ID == "" {
 					return engine.CompletionResponse{}, io.ErrUnexpectedEOF
 				}
+				if text := accumulator.finishText(); text != "" && handle != nil {
+					handle(engine.StreamEvent{
+						Kind: engine.StreamEventTextDelta,
+						Text: text,
+					})
+				}
 				return decodeResponsePayload(accumulator.response), nil
 			}
 			return engine.CompletionResponse{}, err
@@ -80,6 +87,12 @@ func (c *Client) CreateMessageStream(ctx context.Context, request engine.Complet
 			continue
 		}
 		if strings.TrimSpace(string(data)) == "[DONE]" {
+			if text := accumulator.finishText(); text != "" && handle != nil {
+				handle(engine.StreamEvent{
+					Kind: engine.StreamEventTextDelta,
+					Text: text,
+				})
+			}
 			return decodeResponsePayload(accumulator.response), nil
 		}
 
@@ -122,9 +135,13 @@ func (a *streamAccumulator) applyDelta(delta deltaChunk) string {
 	if choice.Message.Role == "" && delta.Role != "" {
 		choice.Message.Role = delta.Role
 	}
+	var emittedText string
 	if delta.Content != "" {
-		current := decodeMessageText(choice.Message.Content)
-		choice.Message.Content = current + delta.Content
+		emittedText = a.textFilter.Append(delta.Content)
+		if emittedText != "" {
+			current := decodeMessageText(choice.Message.Content)
+			choice.Message.Content = current + emittedText
+		}
 	}
 	for _, toolCall := range delta.ToolCalls {
 		a.ensureToolCall(toolCall.Index)
@@ -142,7 +159,20 @@ func (a *streamAccumulator) applyDelta(delta deltaChunk) string {
 			current.Function.Arguments += toolCall.Function.Arguments
 		}
 	}
-	return delta.Content
+	return emittedText
+}
+
+func (a *streamAccumulator) finishText() string {
+	text := a.textFilter.Finish()
+	if text == "" {
+		return ""
+	}
+	if len(a.response.Choices) == 0 {
+		a.response.Choices = []choicePayload{{}}
+	}
+	current := decodeMessageText(a.response.Choices[0].Message.Content)
+	a.response.Choices[0].Message.Content = current + text
+	return text
 }
 
 func (a *streamAccumulator) ensureToolCall(index int) {

@@ -283,7 +283,7 @@ func decodeResponsePayload(decoded responsePayload) engine.CompletionResponse {
 	choice := decoded.Choices[0]
 	content := make([]engine.Block, 0, 1+len(choice.Message.ToolCalls))
 
-	if text := decodeMessageText(choice.Message.Content); text != "" {
+	if text := sanitizeAssistantText(decodeMessageText(choice.Message.Content)); text != "" {
 		content = append(content, engine.Block{
 			Type: engine.BlockText,
 			Text: text,

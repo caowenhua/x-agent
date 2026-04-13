@@ -121,6 +121,41 @@ func TestCreateMessageDecodesTextAndToolCalls(t *testing.T) {
 	}
 }
 
+func TestCreateMessageStripsThinkBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{
+  "id": "chatcmpl_think",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "<think>internal reasoning</think>\n\nOK"
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 3,
+    "completion_tokens": 5
+  }
+}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	response, err := client.CreateMessage(context.Background(), engine.CompletionRequest{
+		Model:     "gpt-4.1",
+		MaxTokens: 64,
+		Messages:  []engine.Message{engine.NewTextMessage(engine.RoleUser, "ping")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Message.Text() != "OK" {
+		t.Fatalf("expected think block to be stripped, got %q", response.Message.Text())
+	}
+}
+
 func TestCreateMessageStreamBuildsFinalMessageAndEmitsDeltas(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -135,7 +170,10 @@ func TestCreateMessageStreamBuildsFinalMessageAndEmitsDeltas(t *testing.T) {
 		}
 
 		w.Header().Set("content-type", "text/event-stream")
-		fmt.Fprint(w, `data: {"id":"chatcmpl_stream","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":""}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"id":"chatcmpl_stream","choices":[{"index":0,"delta":{"role":"assistant","content":"<thi"},"finish_reason":""}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"id":"chatcmpl_stream","choices":[{"index":0,"delta":{"content":"nk>hidden"},"finish_reason":""}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"id":"chatcmpl_stream","choices":[{"index":0,"delta":{"content":"</th"},"finish_reason":""}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"id":"chatcmpl_stream","choices":[{"index":0,"delta":{"content":"ink>\n\nHel"},"finish_reason":""}]}`+"\n\n")
 		fmt.Fprint(w, `data: {"id":"chatcmpl_stream","choices":[{"index":0,"delta":{"content":"lo","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo_tool","arguments":"{\"value\":\"h"}}]},"finish_reason":""}]}`+"\n\n")
 		fmt.Fprint(w, `data: {"id":"chatcmpl_stream","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"i\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}`+"\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
