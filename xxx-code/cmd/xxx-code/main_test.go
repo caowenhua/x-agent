@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/caowenhua/x-agent/xxx-code/internal/buildinfo"
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
 )
 
@@ -100,5 +102,69 @@ func TestRunMainPrintsHelpAndReturnsZero(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "-provider") {
 		t.Fatalf("expected flags in help output, got %q", stdout.String())
+	}
+}
+
+func TestRunMainPrintsVersionAndReturnsZero(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runMain([]string{"--version"}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected version to exit 0, got %d", exitCode)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr for version, got %q", stderr.String())
+	}
+	if stdout.String() != buildinfo.String() {
+		t.Fatalf("expected build info string, got %q", stdout.String())
+	}
+}
+
+func TestRunMainRejectsDaemonRemoteConflict(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runMain([]string{"--api-key", "test-key", "--daemon", "--remote-url", "http://127.0.0.1:7788"}, &stdout, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("expected daemon/remote conflict to exit 1, got %d", exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout for conflict, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--daemon cannot be combined with --remote-url") {
+		t.Fatalf("expected daemon/remote conflict on stderr, got %q", stderr.String())
+	}
+}
+
+func TestMainHelperProcessPrintsVersion(t *testing.T) {
+	if os.Getenv("GO_WANT_MAIN_HELPER") == "1" {
+		os.Args = []string{"xxx-code", "--version"}
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainHelperProcessPrintsVersion")
+	cmd.Env = append(os.Environ(), "GO_WANT_MAIN_HELPER=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run helper main process: %v (%s)", err, string(output))
+	}
+	if string(output) != buildinfo.String() {
+		t.Fatalf("expected helper main output %q, got %q", buildinfo.String(), string(output))
 	}
 }

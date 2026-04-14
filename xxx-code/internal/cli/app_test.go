@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
 	pluginruntime "github.com/caowenhua/x-agent/xxx-code/internal/plugins"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type cliPromptProvider struct{}
@@ -87,6 +91,96 @@ func TestHandleCommandPluginLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(app.config.WorkingDir, ".xxx-code", "plugins", "echoer")); !os.IsNotExist(err) {
 		t.Fatalf("expected plugin directory to be removed, got err=%v", err)
+	}
+}
+
+func TestHandleCommandPluginReloadUpdatesSummary(t *testing.T) {
+	app, out, errOut := newTestApp(t)
+
+	writeCLIPluginSource(t, filepath.Join(app.config.WorkingDir, ".xxx-code", "plugins"), "echoer", "#!/bin/sh\nprintf 'echoer'\n")
+	reloadOutput := mustRunCommand(t, app, out, errOut, ":plugins-reload")
+	reloadSummary := decodePluginSummary(t, reloadOutput)
+	if reloadSummary.PluginCount != 1 || len(reloadSummary.Statuses) != 1 || reloadSummary.Statuses[0].Name != "echoer" {
+		t.Fatalf("unexpected plugin reload summary: %+v", reloadSummary)
+	}
+
+	if err := os.RemoveAll(filepath.Join(app.config.WorkingDir, ".xxx-code", "plugins", "echoer")); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIPluginSource(t, filepath.Join(app.config.WorkingDir, ".xxx-code", "plugins"), "writer", "#!/bin/sh\nprintf 'writer'\n")
+
+	reloadOutput = mustRunCommand(t, app, out, errOut, ":plugins-reload")
+	reloadSummary = decodePluginSummary(t, reloadOutput)
+	if reloadSummary.PluginCount != 1 || len(reloadSummary.Statuses) != 1 || reloadSummary.Statuses[0].Name != "writer" {
+		t.Fatalf("expected reloaded plugin summary for writer, got %+v", reloadSummary)
+	}
+
+	summary := app.currentPluginSummary()
+	if summary["plugin_count"].(int) != 1 || summary["tool_count"].(int) != 1 {
+		t.Fatalf("unexpected current plugin summary: %+v", summary)
+	}
+}
+
+func TestHandleCommandMCPLifecycleAndMetadata(t *testing.T) {
+	app, out, errOut := newTestApp(t)
+	server := newCLIMCPHTTPServer(t)
+	defer func() {
+		_ = app.closeMCP()
+		server.Close()
+	}()
+
+	configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "tester": {
+      "transport": "http",
+      "url": %q
+    }
+  }
+}`, server.URL)
+	if err := os.WriteFile(filepath.Join(app.config.WorkingDir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reloadOutput := mustRunCommand(t, app, out, errOut, ":mcp-reload")
+	if !strings.Contains(reloadOutput, `"server_count": 1`) || !strings.Contains(reloadOutput, `"tool_count": 1`) {
+		t.Fatalf("unexpected MCP reload summary: %s", reloadOutput)
+	}
+	reloadOutput = mustRunCommand(t, app, out, errOut, ":mcp-reload")
+	if !strings.Contains(reloadOutput, `"server_count": 1`) || !strings.Contains(reloadOutput, `"tool_count": 1`) {
+		t.Fatalf("unexpected MCP reload summary after manager reload: %s", reloadOutput)
+	}
+
+	summary := app.currentMCPSummary()
+	if summary["server_count"].(int) != 1 || summary["tool_count"].(int) != 1 {
+		t.Fatalf("unexpected current MCP summary: %+v", summary)
+	}
+	if strings.TrimSpace(summary["config_path"].(string)) == "" {
+		t.Fatalf("expected MCP config path in summary, got %+v", summary)
+	}
+
+	if output := mustRunCommand(t, app, out, errOut, ":mcp"); !strings.Contains(output, `"tester"`) {
+		t.Fatalf("expected MCP summary command to mention tester, got %s", output)
+	}
+	if output := mustRunCommand(t, app, out, errOut, ":mcp-health"); !strings.Contains(output, `"healthy": true`) {
+		t.Fatalf("expected health output to report healthy server, got %s", output)
+	}
+	if output := mustRunCommand(t, app, out, errOut, ":mcp-validate"); !strings.Contains(output, `"present": true`) {
+		t.Fatalf("expected MCP validate output, got %s", output)
+	}
+	if output := mustRunCommand(t, app, out, errOut, ":mcp-resources"); !strings.Contains(output, `"file:///a"`) {
+		t.Fatalf("expected MCP resources output, got %s", output)
+	}
+	if output := mustRunCommand(t, app, out, errOut, ":mcp-resource-templates"); !strings.Contains(output, `"file:///dir/{f}"`) {
+		t.Fatalf("expected MCP resource template output, got %s", output)
+	}
+	if output := mustRunCommand(t, app, out, errOut, ":mcp-prompts"); !strings.Contains(output, `"greet"`) {
+		t.Fatalf("expected MCP prompt listing output, got %s", output)
+	}
+	if output := mustRunCommand(t, app, out, errOut, ":mcp-read tester file:///a"); !strings.Contains(output, `"alpha"`) {
+		t.Fatalf("expected MCP read output, got %s", output)
+	}
+	if output := mustRunCommand(t, app, out, errOut, ":mcp-prompt tester greet name=Pat"); !strings.Contains(output, "Say hi to Pat") {
+		t.Fatalf("expected MCP prompt detail output, got %s", output)
 	}
 }
 
@@ -343,4 +437,79 @@ func writeCLIPluginSource(t *testing.T, rootDir, pluginName, script string) stri
 		t.Fatal(err)
 	}
 	return pluginDir
+}
+
+func newCLIMCPHTTPServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		server := sdkmcp.NewServer(&sdkmcp.Implementation{
+			Name:    "cli-test-mcp",
+			Version: "1.0.0",
+		}, nil)
+		server.AddResource(&sdkmcp.Resource{
+			Name:        "alpha",
+			Description: "Alpha resource",
+			URI:         "file:///a",
+		}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+			_ = ctx
+			if req.Params.URI != "file:///a" {
+				return nil, sdkmcp.ResourceNotFoundError(req.Params.URI)
+			}
+			return &sdkmcp.ReadResourceResult{
+				Contents: []*sdkmcp.ResourceContents{{
+					URI:  "file:///a",
+					Text: "alpha",
+				}},
+			}, nil
+		})
+		server.AddResourceTemplate(&sdkmcp.ResourceTemplate{
+			Name:        "dir",
+			Description: "Directory template",
+			URITemplate: "file:///dir/{f}",
+		}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+			_ = ctx
+			uri := req.Params.URI
+			if !strings.HasPrefix(uri, "file:///dir/") {
+				return nil, sdkmcp.ResourceNotFoundError(uri)
+			}
+			return &sdkmcp.ReadResourceResult{
+				Contents: []*sdkmcp.ResourceContents{{
+					URI:  uri,
+					Text: strings.TrimPrefix(uri, "file:///dir/"),
+				}},
+			}, nil
+		})
+		server.AddPrompt(&sdkmcp.Prompt{
+			Name:        "greet",
+			Description: "Greeting prompt",
+			Arguments: []*sdkmcp.PromptArgument{{
+				Name:        "name",
+				Description: "Name to greet",
+				Required:    true,
+			}},
+		}, func(ctx context.Context, req *sdkmcp.GetPromptRequest) (*sdkmcp.GetPromptResult, error) {
+			_ = ctx
+			return &sdkmcp.GetPromptResult{
+				Description: "Greeting prompt",
+				Messages: []*sdkmcp.PromptMessage{{
+					Role:    "user",
+					Content: &sdkmcp.TextContent{Text: "Say hi to " + req.Params.Arguments["name"]},
+				}},
+			}, nil
+		})
+		sdkmcp.AddTool(server, &sdkmcp.Tool{
+			Name:        "echo_text",
+			Description: "Echo text back to the caller",
+		}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input struct {
+			Value string `json:"value" jsonschema:"value to echo back"`
+		}) (*sdkmcp.CallToolResult, map[string]string, error) {
+			_ = ctx
+			_ = req
+			return nil, map[string]string{"echo": input.Value}, nil
+		})
+		return server
+	}, nil)
+
+	return httptest.NewServer(handler)
 }

@@ -34,6 +34,10 @@ func latestToolUserText(messages []engine.Message) string {
 
 type conditionalToolPromptProvider struct{}
 
+type blockingToolPromptProvider struct {
+	started chan struct{}
+}
+
 func (p *conditionalToolPromptProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 	text := latestToolUserText(request.Messages)
@@ -43,6 +47,16 @@ func (p *conditionalToolPromptProvider) CreateMessage(ctx context.Context, reque
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+text),
 	}, nil
+}
+
+func (p *blockingToolPromptProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = request
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return engine.CompletionResponse{}, ctx.Err()
 }
 
 type flakyWorkflowProvider struct {
@@ -312,6 +326,185 @@ func TestAgentSpawnToolPropagatesPriority(t *testing.T) {
 	}
 	if snapshots[0].Priority != 7 {
 		t.Fatalf("expected priority 7, got %+v", snapshots[0])
+	}
+}
+
+func TestWorkflowManagerSetOnChangeRunsOnCreateWorkflow(t *testing.T) {
+	manager := NewWorkflowManager()
+	changed := false
+	manager.SetOnChange(func() {
+		changed = true
+	})
+
+	_, err := manager.CreateWorkflow("", []*plannedFanoutTask{{
+		task: agentTaskInput{Name: "one", Prompt: "task one"},
+	}}, WorkflowOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected workflow manager onChange hook to run")
+	}
+}
+
+func TestAgentLifecycleToolsAndWorkflowQueries(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewWorkflowManager()
+
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	if def := (&AgentSpawnTool{}).Definition(); def.Name != "agent_spawn" {
+		t.Fatalf("unexpected agent spawn definition: %+v", def)
+	}
+	if def := (&AgentSendTool{}).Definition(); def.Name != "agent_send" {
+		t.Fatalf("unexpected agent send definition: %+v", def)
+	}
+	if def := (&AgentFanoutTool{Manager: manager}).Definition(); def.Name != "agent_fanout" {
+		t.Fatalf("unexpected agent fanout definition: %+v", def)
+	}
+	if def := (&AgentCancelTool{}).Definition(); def.Name != "agent_cancel" {
+		t.Fatalf("unexpected agent cancel definition: %+v", def)
+	}
+	if def := (&AgentWaitTool{}).Definition(); def.Name != "agent_wait" {
+		t.Fatalf("unexpected agent wait definition: %+v", def)
+	}
+	if def := (&AgentListTool{}).Definition(); def.Name != "agent_list" {
+		t.Fatalf("unexpected agent list definition: %+v", def)
+	}
+	if def := (&WorkflowListTool{Manager: manager}).Definition(); def.Name != "workflow_list" {
+		t.Fatalf("unexpected workflow list definition: %+v", def)
+	}
+	if def := (&WorkflowGetTool{Manager: manager}).Definition(); def.Name != "workflow_get" {
+		t.Fatalf("unexpected workflow get definition: %+v", def)
+	}
+	if def := (&WorkflowTasksTool{Manager: manager}).Definition(); def.Name != "workflow_tasks" {
+		t.Fatalf("unexpected workflow tasks definition: %+v", def)
+	}
+	if def := (&WorkflowResumeTool{Manager: manager}).Definition(); def.Name != "workflow_resume" {
+		t.Fatalf("unexpected workflow resume definition: %+v", def)
+	}
+
+	completed, err := runner.SpawnAgent(execCtx, engine.SpawnRequest{
+		Name:       "worker",
+		Prompt:     "task one",
+		Background: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != engine.AgentIdle {
+		t.Fatalf("expected completed worker to be idle, got %+v", completed)
+	}
+
+	sendInput, _ := json.Marshal(map[string]any{
+		"agent_id": completed.ID,
+		"prompt":   "follow-up",
+	})
+	sendResult, err := (&AgentSendTool{}).Call(context.Background(), execCtx, sendInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sendResult.IsError || !strings.Contains(sendResult.Content, `"reply:follow-up"`) {
+		t.Fatalf("expected send tool to return updated agent snapshot, got %s", sendResult.Content)
+	}
+
+	listResult, err := (&AgentListTool{}).Call(context.Background(), execCtx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listResult.Content, `"worker"`) {
+		t.Fatalf("expected list tool to include agent name, got %s", listResult.Content)
+	}
+
+	fanoutTool := &AgentFanoutTool{Manager: manager}
+	fanoutInput, _ := json.Marshal(map[string]any{
+		"wait":         true,
+		"max_parallel": 1,
+		"tasks": []map[string]any{
+			{"name": "one", "prompt": "task one"},
+			{"name": "two", "prompt": "task two"},
+		},
+	})
+	fanoutResult, err := fanoutTool.Call(context.Background(), execCtx, fanoutInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fanoutResult.IsError {
+		t.Fatalf("expected workflow fanout to succeed, got %s", fanoutResult.Content)
+	}
+
+	workflows := manager.ListWorkflows()
+	if len(workflows) != 1 {
+		t.Fatalf("expected one workflow, got %+v", workflows)
+	}
+
+	listWorkflowsResult, err := (&WorkflowListTool{Manager: manager}).Call(context.Background(), execCtx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listWorkflowsResult.Content, workflows[0].ID) {
+		t.Fatalf("expected workflow list output to mention workflow id, got %s", listWorkflowsResult.Content)
+	}
+
+	getWorkflowInput, _ := json.Marshal(map[string]any{"workflow_id": workflows[0].ID})
+	getWorkflowResult, err := (&WorkflowGetTool{Manager: manager}).Call(context.Background(), execCtx, getWorkflowInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(getWorkflowResult.Content, workflows[0].ID) {
+		t.Fatalf("expected workflow get output to mention workflow id, got %s", getWorkflowResult.Content)
+	}
+}
+
+func TestAgentCancelToolCancelsBlockingBackgroundAgent(t *testing.T) {
+	dir := t.TempDir()
+	provider := &blockingToolPromptProvider{started: make(chan struct{}, 1)}
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 1,
+	})
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	snapshot, err := runner.SpawnAgent(execCtx, engine.SpawnRequest{
+		Name:       "blocker",
+		Prompt:     "block forever",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background agent to start")
+	}
+
+	cancelInput, _ := json.Marshal(map[string]any{"agent_id": snapshot.ID})
+	cancelResult, err := (&AgentCancelTool{}).Call(context.Background(), execCtx, cancelInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cancelResult.Content, `"status": "cancelled"`) {
+		t.Fatalf("expected cancelled agent snapshot, got %s", cancelResult.Content)
 	}
 }
 

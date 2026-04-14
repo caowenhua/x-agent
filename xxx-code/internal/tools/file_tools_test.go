@@ -190,3 +190,73 @@ func TestBashToolRejectsDisallowedCommandPrefix(t *testing.T) {
 		t.Fatalf("expected allowed bash command to run, got %s", result.Content)
 	}
 }
+
+func TestWriteFileToolCreatesParentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	input, _ := json.Marshal(map[string]any{
+		"path":    "nested/path/demo.txt",
+		"content": "hello nested world",
+	})
+
+	result, err := (&WriteFileTool{}).Call(context.Background(), &engine.ExecutionContext{
+		WorkingDir: dir,
+	}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected nested write to succeed, got %s", result.Content)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "nested", "path", "demo.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello nested world" {
+		t.Fatalf("unexpected nested file content: %q", string(data))
+	}
+}
+
+func TestGrepToolFindsLiteralMatchesAndDefinitions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "demo.txt"), []byte("hello world\nbye\nhello world again\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := engine.NewRunner(nil, engine.NewRegistry(), engine.RunnerConfig{
+		WorkingDir: dir,
+		PermissionPolicy: engine.PermissionPolicy{
+			ReadRoots:   []string{dir},
+			WriteRoots:  []string{dir},
+			BashEnabled: true,
+		},
+	})
+
+	grepDef := (&GrepTool{}).Definition()
+	if grepDef.Name != "grep" || !strings.Contains(grepDef.Description, "Search file contents") {
+		t.Fatalf("unexpected grep definition: %+v", grepDef)
+	}
+	bashDef := (&BashTool{}).Definition()
+	if bashDef.Name != "bash" || !strings.Contains(bashDef.Description, "shell command") {
+		t.Fatalf("unexpected bash definition: %+v", bashDef)
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"pattern": "hello world",
+		"literal": true,
+		"limit":   1,
+	})
+	result, err := (&GrepTool{}).Call(context.Background(), &engine.ExecutionContext{
+		Runner:     runner,
+		WorkingDir: dir,
+	}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected grep to succeed, got %s", result.Content)
+	}
+	if !strings.Contains(result.Content, `"path": "demo.txt"`) || !strings.Contains(result.Content, `"line": 1`) {
+		t.Fatalf("expected grep match payload, got %s", result.Content)
+	}
+}
