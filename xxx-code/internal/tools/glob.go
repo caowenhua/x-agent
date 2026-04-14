@@ -107,8 +107,15 @@ func globToRegexp(pattern string) (*regexp.Regexp, error) {
 		switch runes[i] {
 		case '*':
 			if i+1 < len(runes) && runes[i+1] == '*' {
-				b.WriteString(".*")
-				i++
+				if i+2 < len(runes) && runes[i+2] == '/' {
+					// Treat **/ as zero or more path segments so patterns like
+					// pricing/**/*.go also match pricing/main.go.
+					b.WriteString(`(?:[^/]+/)*`)
+					i += 2
+				} else {
+					b.WriteString(".*")
+					i++
+				}
 			} else {
 				b.WriteString(`[^/]*`)
 			}

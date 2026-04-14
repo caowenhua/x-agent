@@ -43,6 +43,8 @@ type remoteWorkflowProvider struct{}
 
 type remoteBlockingProvider struct{}
 
+type remoteMCPToolProvider struct{}
+
 func (p *remoteStreamingTestProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 	prompt := latestRemoteUserText(request.Messages)
@@ -103,6 +105,30 @@ func (p *remoteBlockingProvider) CreateMessage(ctx context.Context, request engi
 	_ = request
 	<-ctx.Done()
 	return engine.CompletionResponse{}, ctx.Err()
+}
+
+func (p *remoteMCPToolProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+	if toolResult, ok := latestRemoteToolResult(request.Messages); ok {
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "tool-result:"+toolResult),
+		}, nil
+	}
+	if latestRemoteUserText(request.Messages) == "use stdio mcp" {
+		input, _ := json.Marshal(map[string]any{"value": "hello from stdio"})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "calling mcp"},
+					{Type: engine.BlockToolUse, ID: "toolu_mcp_stdio", Name: "mcp__tester__echo_text", Input: input},
+				},
+			},
+		}, nil
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestRemoteUserText(request.Messages)),
+	}, nil
 }
 
 func TestClientSessionLifecycle(t *testing.T) {
@@ -286,6 +312,58 @@ func TestClientCanValidateReloadAndHealthCheckMCP(t *testing.T) {
 	}
 	if !health[0].Healthy || health[0].LastCheckedAt == nil {
 		t.Fatalf("expected healthy MCP status with timestamp, got %+v", health[0])
+	}
+}
+
+func TestClientCanUseStdioMCPToolsAcrossRemoteTurns(t *testing.T) {
+	cfg := newTestConfig(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "tester": {
+      "command": %q,
+      "args": ["-test.run=TestRemoteMCPHelperProcess", "--", "mcp-echo-server"],
+      "env": {"GO_WANT_REMOTE_MCP_HELPER": "1"}
+    }
+  }
+}`, exe)
+	if err := os.WriteFile(filepath.Join(cfg.WorkingDir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteMCPToolProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "remote-mcp-stdio")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := client.GetMCP(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ServerCount != 1 || summary.ToolCount != 1 {
+		t.Fatalf("expected one connected stdio MCP server, got %+v", summary)
+	}
+
+	result, _, err := client.RunTurn(context.Background(), session.ID, "use stdio mcp", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalText, "hello from stdio") {
+		t.Fatalf("expected stdio MCP result to flow back into remote turn, got %+v", result)
 	}
 }
 
@@ -697,6 +775,36 @@ func newRemoteMCPHTTPServer(t *testing.T) *httptest.Server {
 	}, nil)
 
 	return httptest.NewServer(handler)
+}
+
+func TestRemoteMCPHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_REMOTE_MCP_HELPER") != "1" {
+		return
+	}
+	if len(os.Args) == 0 || os.Args[len(os.Args)-1] != "mcp-echo-server" {
+		os.Exit(2)
+	}
+
+	server := sdkmcp.NewServer(&sdkmcp.Implementation{
+		Name:    "remote-stdio-helper",
+		Version: "1.0.0",
+	}, nil)
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "echo_text",
+		Description: "Echo text back to the caller",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input struct {
+		Value string `json:"value" jsonschema:"value to echo back"`
+	}) (*sdkmcp.CallToolResult, map[string]string, error) {
+		_ = ctx
+		_ = req
+		return nil, map[string]string{"echo": input.Value}, nil
+	})
+
+	if err := server.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func newTestConfig(t *testing.T) config.Config {

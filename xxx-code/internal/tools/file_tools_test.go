@@ -48,12 +48,15 @@ func TestGlobTool(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "top.go"), []byte("package top"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "a", "b", "main.go"), []byte("package main"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	input, _ := json.Marshal(map[string]any{
-		"pattern": "**/*.go",
+		"pattern": "a/**/*.go",
 	})
 
 	result, err := (&GlobTool{}).Call(context.Background(), &engine.ExecutionContext{
@@ -62,8 +65,8 @@ func TestGlobTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "main.go") {
-		t.Fatalf("expected match to include main.go, got %s", result.Content)
+	if !strings.Contains(result.Content, "top.go") || !strings.Contains(result.Content, "main.go") {
+		t.Fatalf("expected matches to include top.go and main.go, got %s", result.Content)
 	}
 }
 

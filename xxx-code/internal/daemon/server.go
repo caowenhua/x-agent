@@ -62,6 +62,8 @@ type managedSession struct {
 	errOut          io.Writer
 	sessionFile     string
 	loadedAt        time.Time
+	runtimeCtx      context.Context
+	runtimeCancel   context.CancelFunc
 
 	saveMu sync.Mutex
 	runMu  sync.Mutex
@@ -1186,17 +1188,20 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 	cfg.Resume = resume
 	cfg.Print = false
 	cfg.Prompt = ""
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 
 	ms := &managedSession{
-		id:          id,
-		config:      cfg,
-		session:     engine.NewSession(),
-		audit:       s.audit,
-		out:         s.out,
-		errOut:      s.errOut,
-		sessionFile: file,
-		loadedAt:    time.Now().UTC(),
-		subs:        make(map[int]*eventSubscriber),
+		id:            id,
+		config:        cfg,
+		session:       engine.NewSession(),
+		audit:         s.audit,
+		out:           s.out,
+		errOut:        s.errOut,
+		sessionFile:   file,
+		loadedAt:      time.Now().UTC(),
+		runtimeCtx:    runtimeCtx,
+		runtimeCancel: runtimeCancel,
+		subs:          make(map[int]*eventSubscriber),
 	}
 	ms.workflowManager = tools.NewWorkflowManager()
 	ms.workflowManager.SetArtifactRoot(filepath.Join(cfg.WorkingDir, ".xxx-code", "artifacts", "workflows"))
@@ -1258,7 +1263,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		}
 	})
 
-	manager, err := mcpruntime.Start(ctx, ms.registry, mcpruntime.Options{
+	manager, err := mcpruntime.Start(ms.runtimeCtx, ms.registry, mcpruntime.Options{
 		WorkingDir: cfg.WorkingDir,
 		ConfigFile: cfg.MCPConfigFile,
 	})
@@ -1372,7 +1377,7 @@ func (m *managedSession) reloadMCP(ctx context.Context) (sessionMCPSummary, erro
 	defer m.runMu.Unlock()
 
 	if m.mcpManager == nil {
-		manager, err := mcpruntime.Start(ctx, m.registry, mcpruntime.Options{
+		manager, err := mcpruntime.Start(m.runtimeCtx, m.registry, mcpruntime.Options{
 			WorkingDir: m.config.WorkingDir,
 			ConfigFile: m.config.MCPConfigFile,
 		})
@@ -1380,7 +1385,7 @@ func (m *managedSession) reloadMCP(ctx context.Context) (sessionMCPSummary, erro
 			return sessionMCPSummary{}, err
 		}
 		m.mcpManager = manager
-	} else if err := m.mcpManager.Reload(ctx); err != nil {
+	} else if err := m.mcpManager.Reload(m.runtimeCtx); err != nil {
 		return sessionMCPSummary{}, err
 	}
 
@@ -1608,6 +1613,9 @@ func (m *managedSession) close() error {
 		if err := m.pluginManager.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if m.runtimeCancel != nil {
+		m.runtimeCancel()
 	}
 	return errors.Join(errs...)
 }
