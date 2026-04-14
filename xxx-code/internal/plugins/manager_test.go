@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
@@ -176,6 +177,85 @@ func TestInstallAndRemovePlugin(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(manager.PluginDir(), "echoer")); !os.IsNotExist(err) {
 		t.Fatalf("expected plugin dir to be removed, got err=%v", err)
+	}
+}
+
+func TestSupportToolsManagePluginLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := writePluginSource(t, filepath.Join(dir, "candidates"), "echoer", "echo", "#!/bin/sh\ncat\n")
+
+	registry := engine.NewRegistry()
+	manager, err := Start(context.Background(), registry, Options{WorkingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	listTool, ok := registry.Get("list_plugins")
+	if !ok {
+		t.Fatal("expected list_plugins tool to be registered")
+	}
+	listResult, err := listTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listResult.Content, `"plugin_count": 0`) {
+		t.Fatalf("expected empty plugin summary, got %s", listResult.Content)
+	}
+
+	validateTool, ok := registry.Get("validate_plugin")
+	if !ok {
+		t.Fatal("expected validate_plugin tool to be registered")
+	}
+	validateInput, _ := json.Marshal(map[string]any{"source": sourceDir})
+	validateResult, err := validateTool.Call(context.Background(), nil, validateInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(validateResult.Content, `"plugin_name": "echoer"`) {
+		t.Fatalf("expected validation output to mention plugin, got %s", validateResult.Content)
+	}
+
+	installTool, ok := registry.Get("install_plugin")
+	if !ok {
+		t.Fatal("expected install_plugin tool to be registered")
+	}
+	installInput, _ := json.Marshal(map[string]any{"source": sourceDir})
+	installResult, err := installTool.Call(context.Background(), nil, installInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(installResult.Content, `"plugin_count": 1`) {
+		t.Fatalf("expected installed plugin summary, got %s", installResult.Content)
+	}
+
+	reloadTool, ok := registry.Get("reload_plugins")
+	if !ok {
+		t.Fatal("expected reload_plugins tool to be registered")
+	}
+	reloadResult, err := reloadTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reloadResult.Content, `"echoer"`) {
+		t.Fatalf("expected reload summary to include plugin status, got %s", reloadResult.Content)
+	}
+
+	removeTool, ok := registry.Get("remove_plugin")
+	if !ok {
+		t.Fatal("expected remove_plugin tool to be registered")
+	}
+	removeInput, _ := json.Marshal(map[string]any{"name": "echoer"})
+	removeResult, err := removeTool.Call(context.Background(), nil, removeInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(removeResult.Content, `"plugin_count": 0`) {
+		t.Fatalf("expected empty plugin summary after removal, got %s", removeResult.Content)
 	}
 }
 

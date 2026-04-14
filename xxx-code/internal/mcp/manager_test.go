@@ -167,6 +167,46 @@ func TestStartLoadsToolsFromDefaultConfig(t *testing.T) {
 	if !strings.Contains(getPromptResult.Content, `Review scheduler carefully.`) {
 		t.Fatalf("expected prompt message, got %s", getPromptResult.Content)
 	}
+
+	if got := manager.ConfigPath(); got != configPath {
+		t.Fatalf("expected manager config path %q, got %q", configPath, got)
+	}
+	if got := manager.ServerCount(); got != 1 {
+		t.Fatalf("expected one connected MCP server, got %d", got)
+	}
+	if got := manager.ToolCount(); got != 1 {
+		t.Fatalf("expected one connected MCP tool, got %d", got)
+	}
+	if report := manager.ValidationReport(); !report.Present || report.ConfigPath != configPath {
+		t.Fatalf("expected validation report for current config, got %+v", report)
+	}
+
+	healthTool, _ := registry.Get("mcp_health")
+	healthResult, err := healthTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(healthResult.Content, `"status": "connected"`) {
+		t.Fatalf("expected live MCP health output, got %s", healthResult.Content)
+	}
+
+	reloadTool, _ := registry.Get("mcp_reload")
+	reloadResult, err := reloadTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reloadResult.Content, configPath) {
+		t.Fatalf("expected reload output to mention config path, got %s", reloadResult.Content)
+	}
+
+	validateTool, _ := registry.Get("mcp_validate")
+	validateResult, err := validateTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(validateResult.Content, `"present": true`) {
+		t.Fatalf("expected validation output to report present config, got %s", validateResult.Content)
+	}
 }
 
 func TestStartLoadsToolsFromRemoteHTTPAndSSEAndWSConfig(t *testing.T) {

@@ -365,6 +365,79 @@ func TestClientCanValidateReloadAndHealthCheckMCP(t *testing.T) {
 	}
 }
 
+func TestClientCanInspectMCPResourcesTemplatesAndPrompts(t *testing.T) {
+	cfg := newTestConfig(t)
+	mcpServer := newRemoteMCPHTTPServer(t)
+	defer mcpServer.Close()
+
+	configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "tester": {
+      "transport": "http",
+      "url": %q
+    }
+  }
+}`, mcpServer.URL)
+	if err := os.WriteFile(filepath.Join(cfg.WorkingDir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteTestProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "remote-mcp-metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resources, err := client.ListMCPResources(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 1 || resources[0].URI != "file:///a" {
+		t.Fatalf("unexpected MCP resources payload: %+v", resources)
+	}
+
+	templates, err := client.ListMCPResourceTemplates(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(templates) != 1 || templates[0].URITemplate != "file:///dir/{f}" {
+		t.Fatalf("unexpected MCP resource templates payload: %+v", templates)
+	}
+
+	prompts, err := client.ListMCPPrompts(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 1 || prompts[0].Name != "greet" {
+		t.Fatalf("unexpected MCP prompts payload: %+v", prompts)
+	}
+
+	resource, err := client.ReadMCPResource(context.Background(), session.ID, "tester", "file:///a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resource.Contents) != 1 || resource.Contents[0].Text != "alpha" {
+		t.Fatalf("unexpected MCP resource details: %+v", resource)
+	}
+
+	prompt, err := client.GetMCPPrompt(context.Background(), session.ID, "tester", "greet", map[string]string{"name": "Pat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt.Messages) != 1 || !strings.Contains(prompt.Messages[0].Content, "Say hi to Pat") {
+		t.Fatalf("unexpected MCP prompt details: %+v", prompt)
+	}
+}
+
 func TestClientCanUseStdioMCPToolsAcrossRemoteTurns(t *testing.T) {
 	cfg := newTestConfig(t)
 	exe, err := os.Executable()
@@ -891,6 +964,13 @@ func TestClientParsesStructuredConflictAndNotFoundErrors(t *testing.T) {
 	}
 }
 
+func TestRemoteErrorStringIncludesStatusCodeCodeAndMessage(t *testing.T) {
+	err := (&Error{StatusCode: http.StatusNotFound, Code: "session_not_found", Message: "missing"}).Error()
+	if !strings.Contains(err, "404") || !strings.Contains(err, "session_not_found") || !strings.Contains(err, "missing") {
+		t.Fatalf("unexpected remote error string: %q", err)
+	}
+}
+
 func newTestClient(t *testing.T) (*Client, func()) {
 	t.Helper()
 	cfg := newTestConfig(t)
@@ -927,6 +1007,58 @@ func newRemoteMCPHTTPServer(t *testing.T) *httptest.Server {
 			Name:    "remote-test-mcp",
 			Version: "1.0.0",
 		}, nil)
+		server.AddResource(&sdkmcp.Resource{
+			Name:        "alpha",
+			Description: "Alpha resource",
+			URI:         "file:///a",
+		}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+			_ = ctx
+			if req.Params.URI != "file:///a" {
+				return nil, sdkmcp.ResourceNotFoundError(req.Params.URI)
+			}
+			return &sdkmcp.ReadResourceResult{
+				Contents: []*sdkmcp.ResourceContents{{
+					URI:  "file:///a",
+					Text: "alpha",
+				}},
+			}, nil
+		})
+		server.AddResourceTemplate(&sdkmcp.ResourceTemplate{
+			Name:        "dir",
+			Description: "Directory template",
+			URITemplate: "file:///dir/{f}",
+		}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+			_ = ctx
+			uri := req.Params.URI
+			if !strings.HasPrefix(uri, "file:///dir/") {
+				return nil, sdkmcp.ResourceNotFoundError(uri)
+			}
+			return &sdkmcp.ReadResourceResult{
+				Contents: []*sdkmcp.ResourceContents{{
+					URI:  uri,
+					Text: strings.TrimPrefix(uri, "file:///dir/"),
+				}},
+			}, nil
+		})
+		server.AddPrompt(&sdkmcp.Prompt{
+			Name:        "greet",
+			Description: "Greeting prompt",
+			Arguments: []*sdkmcp.PromptArgument{{
+				Name:        "name",
+				Description: "Name to greet",
+				Required:    true,
+			}},
+		}, func(ctx context.Context, req *sdkmcp.GetPromptRequest) (*sdkmcp.GetPromptResult, error) {
+			_ = ctx
+			name := req.Params.Arguments["name"]
+			return &sdkmcp.GetPromptResult{
+				Description: "Greeting prompt",
+				Messages: []*sdkmcp.PromptMessage{{
+					Role:    "user",
+					Content: &sdkmcp.TextContent{Text: "Say hi to " + name},
+				}},
+			}, nil
+		})
 		sdkmcp.AddTool(server, &sdkmcp.Tool{
 			Name:        "echo_text",
 			Description: "Echo text back to the caller",
