@@ -14,6 +14,15 @@ type stubProvider struct {
 	calls int
 }
 
+type scriptedProviderStep func(CompletionRequest) (CompletionResponse, error)
+
+type scriptedProvider struct {
+	t     *testing.T
+	mu    sync.Mutex
+	calls int
+	steps []scriptedProviderStep
+}
+
 func (p *stubProvider) CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
 	_ = ctx
 	p.calls++
@@ -34,10 +43,29 @@ func (p *stubProvider) CreateMessage(ctx context.Context, request CompletionRequ
 	}, nil
 }
 
+func (p *scriptedProvider) CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
+	_ = ctx
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.calls >= len(p.steps) {
+		p.t.Fatalf("unexpected provider call %d", p.calls+1)
+	}
+	step := p.steps[p.calls]
+	p.calls++
+	return step(request)
+}
+
 type echoTool struct{}
 
 type countingTool struct {
 	calls int
+}
+
+type scriptedTool struct {
+	name    string
+	mu      sync.Mutex
+	results []ToolResult
 }
 
 type workingDirTool struct{}
@@ -63,6 +91,32 @@ func (t *countingTool) Definition() ToolDefinition {
 func (t *countingTool) Call(ctx context.Context, exec *ExecutionContext, input json.RawMessage) (ToolResult, error) {
 	t.calls++
 	return (&echoTool{}).Call(ctx, exec, input)
+}
+
+func (t *scriptedTool) Definition() ToolDefinition {
+	return ToolDefinition{
+		Name:        t.name,
+		Description: "Scripted test tool",
+		InputSchema: map[string]any{"type": "object"},
+	}
+}
+
+func (t *scriptedTool) Call(ctx context.Context, exec *ExecutionContext, input json.RawMessage) (ToolResult, error) {
+	_ = ctx
+	_ = exec
+	_ = input
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.results) == 0 {
+		return ToolResult{}, nil
+	}
+	result := t.results[0]
+	if len(t.results) > 1 {
+		t.results = t.results[1:]
+	}
+	return result, nil
 }
 
 func (t *workingDirTool) Definition() ToolDefinition {
@@ -128,6 +182,162 @@ func TestRunnerBlocksToolOutsideAllowedList(t *testing.T) {
 	}
 }
 
+func TestRunnerRequiresFailureAcknowledgementAfterToolError(t *testing.T) {
+	writeTool := &scriptedTool{
+		name: "write_file",
+		results: []ToolResult{
+			{Content: "write access is disabled by read-only mode", IsError: true},
+		},
+	}
+	provider := &scriptedProvider{
+		t: t,
+		steps: []scriptedProviderStep{
+			func(request CompletionRequest) (CompletionResponse, error) {
+				return toolUseResponse(t, "write-1", "write_file", map[string]any{
+					"path":    "README.md",
+					"content": "hello",
+				}), nil
+			},
+			func(request CompletionRequest) (CompletionResponse, error) {
+				if got := latestToolResult(request.Messages); !strings.Contains(got, "read-only mode") {
+					t.Fatalf("expected failed tool result in context, got %q", got)
+				}
+				return CompletionResponse{Message: NewTextMessage(RoleAssistant, "WRITE_OK")}, nil
+			},
+			func(request CompletionRequest) (CompletionResponse, error) {
+				if got := latestUserText(request.Messages); !strings.Contains(got, "Do not claim the task succeeded") {
+					t.Fatalf("expected failure reminder, got %q", got)
+				}
+				return CompletionResponse{
+					Message: NewTextMessage(RoleAssistant, "I couldn't write the file because write access is disabled by read-only mode."),
+				}, nil
+			},
+		},
+	}
+	runner := NewRunner(provider, NewRegistry(writeTool), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     6,
+	})
+
+	result, err := runner.RunTurn(context.Background(), NewSession(), "update the file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalText != "I couldn't write the file because write access is disabled by read-only mode." {
+		t.Fatalf("unexpected final text: %q", result.FinalText)
+	}
+	if provider.calls != 3 {
+		t.Fatalf("expected 3 provider calls, got %d", provider.calls)
+	}
+}
+
+func TestRunnerSynthesizesFailureSummaryAfterRepeatedMisleadingSuccess(t *testing.T) {
+	writeTool := &scriptedTool{
+		name: "write_file",
+		results: []ToolResult{
+			{Content: "write access is disabled by read-only mode", IsError: true},
+		},
+	}
+	provider := &scriptedProvider{
+		t: t,
+		steps: []scriptedProviderStep{
+			func(request CompletionRequest) (CompletionResponse, error) {
+				return toolUseResponse(t, "write-1", "write_file", map[string]any{
+					"path":    "README.md",
+					"content": "hello",
+				}), nil
+			},
+			func(request CompletionRequest) (CompletionResponse, error) {
+				return CompletionResponse{Message: NewTextMessage(RoleAssistant, "WRITE_OK")}, nil
+			},
+			func(request CompletionRequest) (CompletionResponse, error) {
+				if got := latestUserText(request.Messages); !strings.Contains(got, "Do not claim the task succeeded") {
+					t.Fatalf("expected failure reminder, got %q", got)
+				}
+				return CompletionResponse{Message: NewTextMessage(RoleAssistant, "still done")}, nil
+			},
+		},
+	}
+	runner := NewRunner(provider, NewRegistry(writeTool), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     6,
+	})
+
+	result, err := runner.RunTurn(context.Background(), NewSession(), "update the file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalText, "I couldn't complete the requested work because these tool calls failed:") {
+		t.Fatalf("expected synthesized failure summary, got %q", result.FinalText)
+	}
+	if !strings.Contains(result.FinalText, "- write_file: write access is disabled by read-only mode") {
+		t.Fatalf("expected failed tool details in summary, got %q", result.FinalText)
+	}
+	if got := result.Messages[len(result.Messages)-1].Text(); got != result.FinalText {
+		t.Fatalf("expected synthesized assistant message at end, got %q", got)
+	}
+}
+
+func TestRunnerAllowsSuccessAfterWriteRecovery(t *testing.T) {
+	editTool := &scriptedTool{
+		name: "edit_file",
+		results: []ToolResult{
+			{Content: "old_string not found in file", IsError: true},
+		},
+	}
+	writeTool := &scriptedTool{
+		name: "write_file",
+		results: []ToolResult{
+			{Content: "rewrote file successfully"},
+		},
+	}
+	provider := &scriptedProvider{
+		t: t,
+		steps: []scriptedProviderStep{
+			func(request CompletionRequest) (CompletionResponse, error) {
+				return toolUseResponse(t, "edit-1", "edit_file", map[string]any{
+					"path":       "README.md",
+					"old_string": "old",
+					"new_string": "new",
+				}), nil
+			},
+			func(request CompletionRequest) (CompletionResponse, error) {
+				if got := latestToolResult(request.Messages); !strings.Contains(got, "old_string not found") {
+					t.Fatalf("expected edit failure in context, got %q", got)
+				}
+				return toolUseResponse(t, "write-1", "write_file", map[string]any{
+					"path":    "README.md",
+					"content": "replacement",
+				}), nil
+			},
+			func(request CompletionRequest) (CompletionResponse, error) {
+				if got := latestUserText(request.Messages); strings.Contains(got, "Do not claim the task succeeded") {
+					t.Fatalf("did not expect failure reminder after successful recovery, got %q", got)
+				}
+				return CompletionResponse{Message: NewTextMessage(RoleAssistant, "done")}, nil
+			},
+		},
+	}
+	runner := NewRunner(provider, NewRegistry(editTool, writeTool), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     6,
+	})
+
+	result, err := runner.RunTurn(context.Background(), NewSession(), "update the file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", result.FinalText)
+	}
+	if provider.calls != 3 {
+		t.Fatalf("expected 3 provider calls, got %d", provider.calls)
+	}
+}
+
 type promptProvider struct{}
 
 func (p *promptProvider) CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
@@ -155,6 +365,22 @@ func latestToolResult(messages []Message) string {
 		}
 	}
 	return ""
+}
+
+func toolUseResponse(t *testing.T, id, name string, input any) CompletionResponse {
+	t.Helper()
+	raw, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CompletionResponse{
+		Message: Message{
+			Role: RoleAssistant,
+			Content: []Block{
+				{Type: BlockToolUse, ID: id, Name: name, Input: raw},
+			},
+		},
+	}
 }
 
 type agentWorkingDirProvider struct{}

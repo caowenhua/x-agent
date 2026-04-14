@@ -65,6 +65,12 @@ type RunResult struct {
 	Messages  []Message
 }
 
+type toolFailure struct {
+	ToolName string
+	Message  string
+	Keys     []string
+}
+
 func NewRunner(provider Provider, registry *Registry, config RunnerConfig) *Runner {
 	if config.MaxTurns <= 0 {
 		config.MaxTurns = 12
@@ -135,6 +141,8 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 
 	var total Usage
 	var finalText string
+	var pendingToolFailures []toolFailure
+	failureReminderInjected := false
 
 	for turn := 0; turn < r.config.MaxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
@@ -154,7 +162,7 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 			Messages:    exec.Session.Snapshot(),
 			Tools:       r.registry.Definitions(),
 			Temperature: r.config.Temperature,
-		})
+		}, len(pendingToolFailures) == 0)
 		if err != nil {
 			return finalize(RunResult{}, err)
 		}
@@ -165,9 +173,10 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 		exec.Session.Append(response.Message)
 
 		assistantText := response.Message.Text()
+		toolUses := collectToolUses(response.Message)
 		if assistantText != "" {
 			finalText = assistantText
-			if !streamedOutput {
+			if !streamedOutput && len(toolUses) > 0 {
 				r.emit(Event{
 					Kind:      EventAssistantText,
 					AgentID:   exec.AgentID,
@@ -177,8 +186,39 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 			}
 		}
 
-		toolUses := collectToolUses(response.Message)
 		if len(toolUses) == 0 {
+			if len(pendingToolFailures) > 0 {
+				if !finalAnswerAcknowledgesToolFailures(assistantText, pendingToolFailures) {
+					if !failureReminderInjected {
+						exec.Session.Append(NewTextMessage(RoleUser, buildToolFailureReminder(pendingToolFailures)))
+						failureReminderInjected = true
+						continue
+					}
+
+					finalText = synthesizeToolFailureSummary(pendingToolFailures)
+					exec.Session.Append(NewTextMessage(RoleAssistant, finalText))
+					r.emit(Event{
+						Kind:      EventAssistantText,
+						AgentID:   exec.AgentID,
+						AgentName: exec.AgentName,
+						Text:      finalText,
+					})
+					return finalize(RunResult{
+						FinalText: finalText,
+						Usage:     total,
+						Messages:  exec.Session.Snapshot(),
+					}, nil)
+				}
+			}
+
+			if assistantText != "" && !streamedOutput {
+				r.emit(Event{
+					Kind:      EventAssistantText,
+					AgentID:   exec.AgentID,
+					AgentName: exec.AgentName,
+					Text:      assistantText,
+				})
+			}
 			return finalize(RunResult{
 				FinalText: finalText,
 				Usage:     total,
@@ -302,6 +342,13 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 					},
 				},
 			})
+			pendingToolFailures = updatePendingToolFailures(pendingToolFailures, toolBlock.Name, toolBlock.Input, result)
+			if len(pendingToolFailures) == 0 {
+				failureReminderInjected = false
+			}
+		}
+		if len(toolUses) > 0 {
+			failureReminderInjected = false
 		}
 	}
 
@@ -322,8 +369,8 @@ func (r *Runner) emit(event Event) {
 	}
 }
 
-func (r *Runner) createMessage(ctx context.Context, exec *ExecutionContext, request CompletionRequest) (CompletionResponse, bool, error) {
-	if !r.config.StreamResponses || exec.AgentID != "" {
+func (r *Runner) createMessage(ctx context.Context, exec *ExecutionContext, request CompletionRequest, allowStream bool) (CompletionResponse, bool, error) {
+	if !allowStream || !r.config.StreamResponses || exec.AgentID != "" {
 		response, err := r.provider.CreateMessage(ctx, request)
 		return response, false, err
 	}
@@ -358,6 +405,126 @@ func (r *Runner) createMessage(ctx context.Context, exec *ExecutionContext, requ
 		})
 	}
 	return response, streamedOutput, err
+}
+
+func updatePendingToolFailures(pending []toolFailure, toolName string, input json.RawMessage, result ToolResult) []toolFailure {
+	keys := toolFailureKeys(toolName, input)
+	if result.IsError {
+		toolKey := toolFailureToolKey(toolName)
+		filtered := pending[:0]
+		for _, failure := range pending {
+			if containsValue(failure.Keys, toolKey) {
+				continue
+			}
+			filtered = append(filtered, failure)
+		}
+		return append(filtered, toolFailure{
+			ToolName: strings.TrimSpace(toolName),
+			Message:  strings.TrimSpace(result.Content),
+			Keys:     keys,
+		})
+	}
+
+	filtered := pending[:0]
+	for _, failure := range pending {
+		if toolFailureSharesKey(failure.Keys, keys) {
+			continue
+		}
+		filtered = append(filtered, failure)
+	}
+	return filtered
+}
+
+func toolFailureKeys(toolName string, input json.RawMessage) []string {
+	normalized := strings.ToLower(strings.TrimSpace(toolName))
+	if normalized == "" {
+		return nil
+	}
+
+	keys := []string{toolFailureToolKey(normalized)}
+	switch normalized {
+	case "edit_file", "write_file":
+		keys = append(keys, "cap:file_write")
+	case "bash":
+		var payload struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(input, &payload); err == nil && bashCommandMayWrite(payload.Command) {
+			keys = append(keys, "cap:file_write")
+		}
+	}
+	return keys
+}
+
+func toolFailureToolKey(toolName string) string {
+	return "tool:" + strings.ToLower(strings.TrimSpace(toolName))
+}
+
+func toolFailureSharesKey(current, other []string) bool {
+	for _, key := range current {
+		if containsValue(other, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func finalAnswerAcknowledgesToolFailures(text string, pending []toolFailure) bool {
+	normalized := normalizeFailureText(text)
+	if normalized == "" {
+		return false
+	}
+
+	keywords := []string{
+		"cannot", "can't", "could not", "couldn't", "unable", "was not able", "wasn't able",
+		"failed", "failure", "error", "blocked", "prevented", "denied", "refused", "read-only",
+		"permission", "policy", "not allowed", "not permitted", "outside allowed", "no changes",
+		"unchanged", "missing", "no such", "not found",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(normalized, keyword) {
+			return true
+		}
+	}
+
+	for _, failure := range pending {
+		if toolName := strings.ToLower(strings.TrimSpace(failure.ToolName)); toolName != "" && strings.Contains(normalized, toolName) {
+			return true
+		}
+		message := normalizeFailureText(failure.Message)
+		if message != "" && strings.Contains(normalized, message) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildToolFailureReminder(pending []toolFailure) string {
+	return "One or more tool calls just failed. Do not claim the task succeeded unless you actually retried successfully. In your next response, either call more tools to recover or clearly explain what failed and why.\n\nFailed tool calls:\n" + formatToolFailureBullets(pending)
+}
+
+func synthesizeToolFailureSummary(pending []toolFailure) string {
+	return "I couldn't complete the requested work because these tool calls failed:\n" + formatToolFailureBullets(pending)
+}
+
+func formatToolFailureBullets(pending []toolFailure) string {
+	lines := make([]string, 0, len(pending))
+	for _, failure := range pending {
+		name := strings.TrimSpace(failure.ToolName)
+		if name == "" {
+			name = "tool"
+		}
+		message := strings.TrimSpace(failure.Message)
+		if message == "" {
+			message = "unknown error"
+		}
+		lines = append(lines, "- "+name+": "+message)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeFailureText(text string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(text))), " ")
 }
 
 func collectToolUses(message Message) []Block {
