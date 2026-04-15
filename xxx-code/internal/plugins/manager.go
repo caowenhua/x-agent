@@ -495,7 +495,7 @@ func validateToolSpec(report *ValidationReport, manifestDir string, tool Command
 	}
 	command := strings.TrimSpace(tool.Command)
 	if strings.Contains(command, string(filepath.Separator)) {
-		resolved := filepath.Clean(filepath.Join(manifestDir, command))
+		resolved := resolveManifestPath(manifestDir, command)
 		info, err := os.Stat(resolved)
 		if err != nil {
 			report.Issues = append(report.Issues, ValidationIssue{
@@ -512,7 +512,7 @@ func validateToolSpec(report *ValidationReport, manifestDir string, tool Command
 		}
 	}
 	if strings.TrimSpace(tool.Cwd) != "" {
-		resolved := filepath.Clean(filepath.Join(manifestDir, strings.TrimSpace(tool.Cwd)))
+		resolved := resolveManifestPath(manifestDir, strings.TrimSpace(tool.Cwd))
 		info, err := os.Stat(resolved)
 		if err != nil {
 			report.Issues = append(report.Issues, ValidationIssue{
@@ -681,11 +681,11 @@ func newCommandTool(manifest Manifest, manifestPath string, spec CommandToolSpec
 	command := strings.TrimSpace(spec.Command)
 	manifestDir := filepath.Dir(manifestPath)
 	if strings.Contains(command, string(filepath.Separator)) {
-		command = filepath.Clean(filepath.Join(manifestDir, command))
+		command = resolveManifestPath(manifestDir, command)
 	}
 	toolCwd := ""
 	if strings.TrimSpace(spec.Cwd) != "" {
-		toolCwd = filepath.Clean(filepath.Join(manifestDir, strings.TrimSpace(spec.Cwd)))
+		toolCwd = resolveManifestPath(manifestDir, strings.TrimSpace(spec.Cwd))
 	}
 
 	timeout := time.Duration(0)
@@ -794,6 +794,17 @@ func normalizeName(value string) string {
 		return "plugin"
 	}
 	return result
+}
+
+func resolveManifestPath(baseDir, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	return filepath.Clean(filepath.Join(baseDir, value))
 }
 
 func copyStringMap(input map[string]string) map[string]string {

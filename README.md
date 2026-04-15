@@ -107,6 +107,7 @@ x-agent/
     docs/                    补充部署文档
     examples/                YAML 配置模板与 .env 示例
     cmd/xxx-code/            程序入口
+    cmd/xxx-code-stability/  长稳/soak 测试入口
     internal/                运行时核心实现
 ```
 
@@ -179,6 +180,13 @@ go run ./cmd/xxx-code --version
 cd /Users/tt/goworkspace/src/x-agent/xxx-code
 go test ./...
 go test -race ./...
+```
+
+如果想跑一轮不依赖真实模型 key 的稳定性回归：
+
+```bash
+cd /Users/tt/goworkspace/src/x-agent/xxx-code
+go run ./cmd/xxx-code-stability --iterations 1
 ```
 
 ## 推荐阅读入口

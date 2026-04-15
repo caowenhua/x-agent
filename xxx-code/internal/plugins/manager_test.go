@@ -131,6 +131,36 @@ func TestValidateSourceReportsIssues(t *testing.T) {
 	}
 }
 
+func TestValidateSourceAcceptsAbsoluteCommandPath(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := filepath.Join(dir, "candidate")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(dir, "echo-tool.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\ncat\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{
+  "name": "absolute",
+  "tools": [{
+    "name": "echo",
+    "description": "Echo plugin",
+    "input_schema": {"type": "object"},
+    "command": "` + scriptPath + `"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(sourceDir, "plugin.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := ValidateSource(dir, sourceDir)
+	if !report.Valid {
+		t.Fatalf("expected absolute command path to validate, got %+v", report)
+	}
+}
+
 func TestInstallAndRemovePlugin(t *testing.T) {
 	dir := t.TempDir()
 	sourceDir := writePluginSource(t, filepath.Join(dir, "candidates"), "echoer", "echo", "#!/bin/sh\ncat\n")

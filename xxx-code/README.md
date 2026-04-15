@@ -1113,6 +1113,24 @@ go test -race ./...
 go test -cover ./...
 ```
 
+快速跑一轮内建稳定性/长稳场景：
+
+```bash
+go run ./cmd/xxx-code-stability --iterations 1
+```
+
+做更长时间的 soak，并把结果落成 JSON：
+
+```bash
+go run ./cmd/xxx-code-stability \
+  --duration 30m \
+  --concurrency 4 \
+  --restart-every 20 \
+  --summary-json ./artifacts/stability-summary.json
+```
+
+这套稳定性工具会拉起一个进程内 daemon、动态插件、MCP HTTP server 和 remote client，全程使用内置 deterministic provider，因此不依赖外部模型 key，适合做长时间回归、重启恢复验证和发布前 soak。
+
 查看版本：
 
 ```bash
@@ -1123,6 +1141,7 @@ go run ./cmd/xxx-code --version
 
 - [ROADMAP.md](./ROADMAP.md)
 - [docs/daemon-deployment.md](./docs/daemon-deployment.md)
+- [docs/stability-soak.md](./docs/stability-soak.md)
 - [examples/config.yaml](./examples/config.yaml)
 - [examples/.env.example](./examples/.env.example)
 
