@@ -141,6 +141,7 @@
 - token file 热轮换
 - daemon ACL
 - daemon 审计日志
+- daemon metrics / pprof
 - per-client rate limit
 - `--log-level / --debug / --log-file`
 
@@ -448,6 +449,20 @@ go build -o ./bin/xxx-code-stability ./cmd/xxx-code-stability
 ./bin/xxx-code-stability --version
 ```
 
+### 运行 benchmark 基线
+
+```bash
+go test -run '^$' -bench . ./internal/engine ./internal/tools ./internal/daemon
+```
+
+如果你只想看某一段关键路径：
+
+```bash
+go test -run '^$' -bench BenchmarkRunnerRunTurn ./internal/engine
+go test -run '^$' -bench BenchmarkAgentFanoutTool ./internal/tools
+go test -run '^$' -bench BenchmarkDaemonTurnHTTP ./internal/daemon
+```
+
 ### 查看版本
 
 ```bash
@@ -523,6 +538,40 @@ go run ./cmd/xxx-code \
   --tui
 ```
 
+### 方式 5：daemon 观测与性能排障
+
+如果 daemon 会长期运行，建议把 metrics 打开；排障窗口里再按需开 `pprof`：
+
+```bash
+export ANTHROPIC_API_KEY=your-key
+go run ./cmd/xxx-code \
+  --daemon \
+  --listen 127.0.0.1:7331 \
+  --daemon-token-file .secrets/daemon-token.txt \
+  --daemon-metrics \
+  --daemon-pprof
+```
+
+抓 metrics：
+
+```bash
+curl -H "Authorization: Bearer $(cat .secrets/daemon-token.txt)" \
+  http://127.0.0.1:7331/metrics
+```
+
+抓 heap profile 文本快照：
+
+```bash
+curl -H "Authorization: Bearer $(cat .secrets/daemon-token.txt)" \
+  http://127.0.0.1:7331/debug/pprof/heap?debug=1
+```
+
+说明：
+
+- `/metrics` 与 `/debug/pprof/*` 都受 daemon token 保护
+- 两者都归属于 daemon 的 `introspection` ACL mode
+- `metrics` 适合常开，`pprof` 更适合临时开启做性能定位
+
 ## 配置方式
 
 ### 配置优先级
@@ -594,6 +643,8 @@ log_level: info
 | `model` | 模型名或 deployment 名 |
 | `cwd` | 工具和相对路径的工作目录 |
 | `session_file` | 主会话持久化文件 |
+| `daemon_metrics` | 是否暴露 `/metrics` |
+| `daemon_pprof` | 是否暴露 `/debug/pprof/*` |
 | `mcp_config` | MCP 配置文件路径 |
 | `plugin_dir` | 插件目录 |
 | `stream` | 是否流式输出模型文本 |

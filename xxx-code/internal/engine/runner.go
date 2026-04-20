@@ -25,11 +25,14 @@ const (
 )
 
 type Event struct {
-	Kind      EventKind
-	AgentID   string
-	AgentName string
-	ToolName  string
-	Text      string
+	Kind         EventKind
+	AgentID      string
+	AgentName    string
+	ToolName     string
+	Text         string
+	ToolDuration time.Duration
+	IsError      bool
+	Executed     bool
 }
 
 type RunnerConfig struct {
@@ -262,6 +265,7 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 					AgentName: exec.AgentName,
 					ToolName:  toolBlock.Name,
 					Text:      result.Content,
+					IsError:   true,
 				})
 				exec.Session.Append(Message{
 					Role: RoleUser,
@@ -288,6 +292,7 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 					AgentName: exec.AgentName,
 					ToolName:  toolBlock.Name,
 					Text:      result.Content,
+					IsError:   true,
 				})
 				exec.Session.Append(Message{
 					Role: RoleUser,
@@ -304,8 +309,10 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 			}
 
 			toolCtx, cancel := context.WithTimeout(ctx, r.config.ToolTimeout)
+			toolStartedAt := time.Now()
 			result, callErr := tool.Call(toolCtx, exec, toolBlock.Input)
 			cancel()
+			toolDuration := time.Since(toolStartedAt)
 			if errors.Is(callErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 				return finalize(RunResult{
 					FinalText: finalText,
@@ -323,11 +330,14 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 			result.Content = truncate(result.Content, 120_000)
 
 			r.emit(Event{
-				Kind:      EventToolResult,
-				AgentID:   exec.AgentID,
-				AgentName: exec.AgentName,
-				ToolName:  toolBlock.Name,
-				Text:      result.Content,
+				Kind:         EventToolResult,
+				AgentID:      exec.AgentID,
+				AgentName:    exec.AgentName,
+				ToolName:     toolBlock.Name,
+				Text:         result.Content,
+				ToolDuration: toolDuration,
+				IsError:      result.IsError,
+				Executed:     true,
 			})
 			r.afterToolHook(ctx, exec, toolBlock.Name, toolBlock.Input, result)
 

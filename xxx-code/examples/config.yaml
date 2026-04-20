@@ -16,6 +16,10 @@ daemon_audit_file: .xxx-code/daemon/audit.jsonl
 daemon_rate_limit_per_minute: 120
 # Burst allowance for the daemon rate limiter.
 daemon_rate_limit_burst: 20
+# Expose Prometheus-style metrics at /metrics.
+daemon_metrics: true
+# Expose pprof under /debug/pprof when debugging performance issues.
+daemon_pprof: false
 # Daemon API modes that are allowed when ACLs are enabled.
 daemon_allow_modes:
   - sessions_read

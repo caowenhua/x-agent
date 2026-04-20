@@ -43,6 +43,7 @@ type Server struct {
 	audit           *auditLogger
 	access          daemonAccessPolicy
 	rateLimiter     *requestRateLimiter
+	metrics         *daemonMetrics
 
 	mu       sync.Mutex
 	sessions map[string]*managedSession
@@ -64,6 +65,7 @@ type managedSession struct {
 	loadedAt        time.Time
 	runtimeCtx      context.Context
 	runtimeCancel   context.CancelFunc
+	metrics         *daemonMetrics
 
 	saveMu sync.Mutex
 	runMu  sync.Mutex
@@ -241,6 +243,7 @@ func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFacto
 		audit:           newAuditLogger(auditFile),
 		access:          newDaemonAccessPolicy(cfg),
 		rateLimiter:     newRequestRateLimiter(cfg.DaemonRateLimitPerMinute, cfg.DaemonRateLimitBurst),
+		metrics:         newDaemonMetrics(),
 		sessions:        make(map[string]*managedSession),
 	}
 }
@@ -297,6 +300,12 @@ func (s *Server) Close() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
+	if s.config.DaemonMetrics {
+		mux.HandleFunc("/metrics", s.handleMetrics)
+	}
+	if s.config.DaemonPprof {
+		s.registerPprofRoutes(mux)
+	}
 	mux.HandleFunc("/v1/audit", s.handleAudit)
 	mux.HandleFunc("/v1/sessions", s.handleSessions)
 	mux.HandleFunc("/v1/sessions/", s.handleSessionRoutes)
@@ -343,6 +352,9 @@ func (s *Server) withDiagnostics(next http.Handler) http.Handler {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		mode, sessionID := classifyDaemonRoute(r.URL.Path, r.Method)
+		if s.metrics != nil {
+			s.metrics.recordHTTPRequest(r.Method, daemonRouteLabel(r.URL.Path), recorder.status, time.Since(started))
+		}
 		s.auditLog(r.Context(), AuditEvent{
 			Action:     "request",
 			Mode:       mode,
@@ -1201,6 +1213,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		loadedAt:      time.Now().UTC(),
 		runtimeCtx:    runtimeCtx,
 		runtimeCancel: runtimeCancel,
+		metrics:       s.metrics,
 		subs:          make(map[int]*eventSubscriber),
 	}
 	ms.workflowManager = tools.NewWorkflowManager()
@@ -1506,7 +1519,11 @@ func (m *managedSession) runTurn(ctx context.Context, prompt string) (engine.Run
 	}
 	defer release()
 
+	startedAt := time.Now()
 	result, err := m.runner.RunTurn(runCtx, m.session, prompt)
+	if m.metrics != nil {
+		m.metrics.recordTurn(runOutcomeLabel(err), time.Since(startedAt))
+	}
 	if err != nil {
 		return result, err
 	}
@@ -1623,6 +1640,9 @@ func (m *managedSession) close() error {
 func (m *managedSession) handleEvent(event engine.Event) {
 	m.publishEvent(event)
 	m.auditEvent(event)
+	if m.metrics != nil {
+		m.metrics.recordEvent(event)
+	}
 	switch event.Kind {
 	case engine.EventAgentSpawned, engine.EventAgentCompleted, engine.EventAgentCancelled:
 		if err := m.save(); err != nil {

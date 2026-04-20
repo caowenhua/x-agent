@@ -277,7 +277,18 @@ func (l *requestRateLimiter) compact(now time.Time) {
 
 func classifyDaemonRoute(path, method string) (string, string) {
 	path = strings.TrimSpace(path)
-	if path == "" || !strings.HasPrefix(path, "/v1/") {
+	if path == "" {
+		return "", ""
+	}
+	switch {
+	case path == "/metrics":
+		return daemonModeIntrospection, ""
+	case path == "/debug/pprof", path == "/debug/pprof/":
+		return daemonModeIntrospection, ""
+	case strings.HasPrefix(path, "/debug/pprof/"):
+		return daemonModeIntrospection, ""
+	}
+	if !strings.HasPrefix(path, "/v1/") {
 		return "", ""
 	}
 	path = strings.Trim(strings.TrimPrefix(path, "/v1/"), "/")

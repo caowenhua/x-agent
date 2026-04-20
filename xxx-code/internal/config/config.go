@@ -53,6 +53,8 @@ type Config struct {
 	DaemonDenySessionPrefixes  []string
 	DaemonRateLimitPerMinute   int
 	DaemonRateLimitBurst       int
+	DaemonMetrics              bool
+	DaemonPprof                bool
 	RemoteURL                  string
 	RemoteToken                string
 	RemoteTokenFile            string
@@ -114,6 +116,8 @@ type fileConfig struct {
 	DaemonDenySessionPrefixes  []string `json:"daemon_deny_session_prefix,omitempty"`
 	DaemonRateLimitPerMinute   *int     `json:"daemon_rate_limit_per_minute,omitempty"`
 	DaemonRateLimitBurst       *int     `json:"daemon_rate_limit_burst,omitempty"`
+	DaemonMetrics              *bool    `json:"daemon_metrics,omitempty"`
+	DaemonPprof                *bool    `json:"daemon_pprof,omitempty"`
 	RemoteURL                  *string  `json:"remote_url,omitempty"`
 	RemoteToken                *string  `json:"remote_token,omitempty"`
 	RemoteTokenFile            *string  `json:"remote_token_file,omitempty"`
@@ -244,6 +248,8 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	fs.StringVar(&cfg.RemoteToken, "remote-token", cfg.RemoteToken, "Bearer token to send when connecting to a protected daemon")
 	fs.IntVar(&cfg.DaemonRateLimitPerMinute, "daemon-rate-limit-per-minute", cfg.DaemonRateLimitPerMinute, "Optional per-client request rate limit for daemon /v1/* requests")
 	fs.IntVar(&cfg.DaemonRateLimitBurst, "daemon-rate-limit-burst", cfg.DaemonRateLimitBurst, "Burst capacity for the daemon per-client rate limiter")
+	fs.BoolVar(&cfg.DaemonMetrics, "daemon-metrics", cfg.DaemonMetrics, "Expose daemon metrics at /metrics and protect them with daemon auth + introspection ACL")
+	fs.BoolVar(&cfg.DaemonPprof, "daemon-pprof", cfg.DaemonPprof, "Expose daemon pprof endpoints under /debug/pprof and protect them with daemon auth + introspection ACL")
 	fs.StringVar(&cfg.RemoteURL, "remote-url", cfg.RemoteURL, "Daemon base URL to use as a remote bridge")
 	fs.StringVar(&cfg.RemoteSession, "remote-session", cfg.RemoteSession, "Remote daemon session ID to open or create")
 	fs.BoolVar(&cfg.RemoteList, "remote-list-sessions", cfg.RemoteList, "List daemon sessions instead of running a local session")
@@ -427,6 +433,8 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	applyString(&cfg.RemoteToken, file.RemoteToken)
 	applyInt(&cfg.DaemonRateLimitPerMinute, file.DaemonRateLimitPerMinute)
 	applyInt(&cfg.DaemonRateLimitBurst, file.DaemonRateLimitBurst)
+	applyBool(&cfg.DaemonMetrics, file.DaemonMetrics)
+	applyBool(&cfg.DaemonPprof, file.DaemonPprof)
 	applyString(&cfg.RemoteURL, file.RemoteURL)
 	applyString(&cfg.RemoteSession, file.RemoteSession)
 	applyBool(&cfg.RemoteList, file.RemoteList)
@@ -601,6 +609,20 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 			return fmt.Errorf("invalid XXX_CODE_DAEMON_RATE_LIMIT_BURST value: %w", err)
 		}
 		cfg.DaemonRateLimitBurst = parsed
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_METRICS"); ok {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid XXX_CODE_DAEMON_METRICS value: %w", err)
+		}
+		cfg.DaemonMetrics = parsed
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_PPROF"); ok {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid XXX_CODE_DAEMON_PPROF value: %w", err)
+		}
+		cfg.DaemonPprof = parsed
 	}
 	if value, ok := lookup("XXX_CODE_SYSTEM_PROMPT_FILE"); ok {
 		raw.systemPromptFile = strings.TrimSpace(value)

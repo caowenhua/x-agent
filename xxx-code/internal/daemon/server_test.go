@@ -1075,6 +1075,102 @@ func TestDaemonCanListReadAndFetchMCPMetadata(t *testing.T) {
 	}
 }
 
+func TestDaemonMetricsEndpointRequiresOptIn(t *testing.T) {
+	server, testServer := newTestDaemon(t)
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	_, body := doRawRequest(t, mustRequest(t, http.MethodGet, testServer.URL+"/metrics", nil), http.StatusNotFound)
+	if !strings.Contains(string(body), "404 page not found") {
+		t.Fatalf("unexpected metrics disabled body: %s", string(body))
+	}
+}
+
+func TestDaemonMetricsEndpointReportsRuntimeStats(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonMetrics = true
+	cfg.DaemonToken = "secret-token"
+
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonOrchestrationProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	created := doAuthorizedJSON(t, "secret-token", mustRequest(t, http.MethodPost, testServer.URL+"/v1/sessions", map[string]any{}), http.StatusCreated)
+	sessionID := created["session"].(map[string]any)["id"].(string)
+
+	doAuthorizedJSON(t, "secret-token", mustRequest(t, http.MethodPost, testServer.URL+"/v1/sessions/"+sessionID+"/turns", map[string]any{
+		"prompt": "fanout work",
+	}), http.StatusOK)
+
+	resp, body := doRawRequest(t, withBearer(t, "secret-token", mustRequest(t, http.MethodGet, testServer.URL+"/metrics", nil)), http.StatusOK)
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/plain") {
+		t.Fatalf("unexpected content type: %q", got)
+	}
+
+	text := string(body)
+	for _, needle := range []string{
+		`xxx_code_daemon_http_requests_total{method="post",outcome="ok",route="v1_session_turns",status="200"} 1`,
+		`xxx_code_daemon_turns_total{result="ok"} 1`,
+		`xxx_code_daemon_tool_calls_total{result="ok",tool="agent_fanout"} 1`,
+		`xxx_code_daemon_agent_events_total{event="agent_completed"} 2`,
+		`xxx_code_daemon_agent_events_total{event="agent_spawned"} 2`,
+		`xxx_code_daemon_agents{status="idle"} 2`,
+		`xxx_code_daemon_workflows{status="completed"} 1`,
+		`go_goroutines`,
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("expected metrics output to contain %q, got:\n%s", needle, text)
+		}
+	}
+}
+
+func TestDaemonMetricsEndpointHonorsIntrospectionACL(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonMetrics = true
+	cfg.DaemonToken = "secret-token"
+	cfg.DaemonAllowModes = []string{daemonModeTurns}
+
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	doAuthorizedJSON(t, "secret-token", mustRequest(t, http.MethodGet, testServer.URL+"/metrics", nil), http.StatusForbidden)
+}
+
+func TestDaemonPprofEndpointProtectedAndAvailable(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonPprof = true
+	cfg.DaemonToken = "secret-token"
+
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	doJSON(t, mustRequest(t, http.MethodGet, testServer.URL+"/debug/pprof/", nil), http.StatusUnauthorized)
+
+	_, body := doRawRequest(t, withBearer(t, "secret-token", mustRequest(t, http.MethodGet, testServer.URL+"/debug/pprof/", nil)), http.StatusOK)
+	if !strings.Contains(string(body), "profile?debug=1") {
+		t.Fatalf("unexpected pprof index body: %s", string(body))
+	}
+}
+
 func TestManagedSessionSubscriptionLifecycle(t *testing.T) {
 	session := &managedSession{
 		subs: make(map[int]*eventSubscriber),
@@ -1343,6 +1439,12 @@ func doAuthorizedJSON(t *testing.T, token string, req *http.Request, wantStatus 
 	t.Helper()
 	req.Header.Set("Authorization", "Bearer "+token)
 	return doJSON(t, req, wantStatus)
+}
+
+func withBearer(t *testing.T, token string, req *http.Request) *http.Request {
+	t.Helper()
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
 }
 
 func doRawRequest(t *testing.T, req *http.Request, wantStatus int) (*http.Response, []byte) {

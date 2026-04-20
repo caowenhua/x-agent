@@ -115,6 +115,11 @@ server {
 3. `--daemon-allow-modes` / `--daemon-allow-session-prefix` 限制访问面
 4. `--daemon-rate-limit-per-minute` / `--daemon-rate-limit-burst` 开启
 
+如果这台 daemon 会长期跑，建议再补上：
+
+5. `--daemon-metrics` 开启
+6. 排障时按需临时开启 `--daemon-pprof`
+
 一个更接近生产的例子：
 
 ```bash
@@ -123,11 +128,59 @@ go run ./cmd/xxx-code \
   --listen 127.0.0.1:7331 \
   --daemon-token-file .secrets/daemon-token.json \
   --daemon-audit-file .xxx-code/daemon/audit.jsonl \
+  --daemon-metrics \
   --daemon-allow-modes sessions_read,sessions_write,turns,agents,workflows,audit \
   --daemon-allow-session-prefix team- \
   --daemon-rate-limit-per-minute 120 \
   --daemon-rate-limit-burst 20
 ```
+
+## Metrics 与 pprof
+
+`xxx-code` 现在支持两个诊断入口：
+
+- `/metrics`
+- `/debug/pprof/*`
+
+这两个入口都不走单独的安全逻辑，而是直接复用 daemon 现有的：
+
+- bearer token
+- `daemon_allow_modes` / `daemon_deny_modes`
+- `introspection` ACL mode
+
+也就是说，如果你配置了 token，那么抓 metrics 和 pprof 也必须带 token；如果你把 `introspection` 从 allowlist 里去掉，这两个入口也会一起被拒绝。
+
+推荐做法：
+
+- `--daemon-metrics` 常开
+- `--daemon-pprof` 只在排障窗口开启，问题定位完就关闭
+- 如果确实需要长期保留 `pprof`，至少放在内网、SSH tunnel 或反向代理之后
+
+抓 metrics 示例：
+
+```bash
+curl -H "Authorization: Bearer $(cat /etc/xxx-code/secrets/daemon-token.txt)" \
+  http://127.0.0.1:7331/metrics
+```
+
+抓 heap profile 示例：
+
+```bash
+curl -H "Authorization: Bearer $(cat /etc/xxx-code/secrets/daemon-token.txt)" \
+  http://127.0.0.1:7331/debug/pprof/heap > /tmp/xxx-code-heap.pb.gz
+
+go tool pprof -http=:0 /tmp/xxx-code-heap.pb.gz
+```
+
+如果你使用的是受保护的 daemon，可以先通过本地隧道暴露，再在隧道内抓取 profile。
+
+当前 `/metrics` 里已经包含：
+
+- daemon HTTP request / error 计数
+- turn / tool latency 汇总
+- agent lifecycle 事件计数
+- 当前 session / agent / workflow 状态分布
+- Go runtime goroutine / heap / GC 指标
 
 ## systemd 模板
 

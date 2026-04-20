@@ -129,15 +129,18 @@
 
 ## P1 可观测性
 
-- [ ] 补基础 runtime metrics
+- [x] 补基础 runtime metrics
   - 目标：让 daemon 除了日志和 audit 之外，还能暴露稳定的运行指标
-  - 产出：请求数、错误数、turn latency、tool latency、agent/workflow 状态计数
-- [ ] 补性能分析入口
+  - 已补 `/metrics`
+  - 已补请求数、错误数、turn latency、tool latency、agent/workflow 状态计数与 Go runtime 指标
+- [x] 补性能分析入口
   - 目标：让长稳和性能问题更容易定位
-  - 产出：`pprof` 或等价 profiling 方案、性能调试文档
-- [ ] 建 benchmark 基线
+  - 已补 `/debug/pprof/*`
+  - 已补基于 daemon token + introspection ACL 的保护
+  - 已补性能调试与部署文档
+- [x] 建 benchmark 基线
   - 目标：关键路径性能退化可量化
-  - 产出：provider loop、workflow orchestration、daemon API 的 benchmark
+  - 已补 provider loop、workflow orchestration、daemon API benchmark
 
 ## P2 开发者生态
 
@@ -162,8 +165,7 @@
 
 当前默认推进顺序：
 
-1. 进入 P1 可观测性
-2. 最后整理 P2 开发者生态
+1. 进入 P2 开发者生态
 
 ## 阶段完成标准
 

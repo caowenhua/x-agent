@@ -203,6 +203,7 @@ func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 		"XXX_CODE_DAEMON_ALLOW_MODES":         "sessions_read,turns",
 		"XXX_CODE_DAEMON_DENY_SESSION_PREFIX": "blocked-",
 		"XXX_CODE_DAEMON_RATE_LIMIT_BURST":    "12",
+		"XXX_CODE_DAEMON_PPROF":               "true",
 	}
 	cfg, err := LoadArgs([]string{
 		"--daemon-token-file", "secrets/daemon.token",
@@ -211,6 +212,7 @@ func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 		"--daemon-allow-session-prefix", "team-",
 		"--remote-token-file", "secrets/remote.token",
 		"--daemon-rate-limit-per-minute", "30",
+		"--daemon-metrics",
 	}, lookupFromMap(env), dir)
 	if err != nil {
 		t.Fatal(err)
@@ -239,6 +241,12 @@ func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 	}
 	if cfg.DaemonRateLimitPerMinute != 30 || cfg.DaemonRateLimitBurst != 12 {
 		t.Fatalf("unexpected daemon rate limit config: per_minute=%d burst=%d", cfg.DaemonRateLimitPerMinute, cfg.DaemonRateLimitBurst)
+	}
+	if !cfg.DaemonMetrics {
+		t.Fatal("expected daemon metrics to be enabled from flag")
+	}
+	if !cfg.DaemonPprof {
+		t.Fatal("expected daemon pprof to be enabled from env")
 	}
 }
 
