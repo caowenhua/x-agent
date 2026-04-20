@@ -144,15 +144,18 @@
 
 ## P2 开发者生态
 
-- [ ] 补插件开发指南
+- [x] 补插件开发指南
   - 目标：让外部开发者清楚如何写 command plugin
-  - 产出：manifest 说明、最佳实践、调试案例
-- [ ] 补 MCP 集成指南
+  - 已补 `docs/plugin-development.md`
+  - 已补 `examples/plugins/echoer`
+- [x] 补 MCP 集成指南
   - 目标：让使用者更容易接自己的 MCP server
-  - 产出：配置样例、常见 transport、排障手册
-- [ ] 补扩展设计文档
+  - 已补 `docs/mcp-integration.md`
+  - 已补 `examples/mcp/*.json`
+- [x] 补扩展设计文档
   - 目标：为未来更通用的 multi-agent 平台化演进留下稳定边界
-  - 产出：tool/plugin/MCP/workflow 的分层约定
+  - 已补 `docs/extension-architecture.md`
+  - 已明确 tool/plugin/MCP/workflow 的分层约定
 
 ## 推荐推进顺序
 
@@ -165,7 +168,8 @@
 
 当前默认推进顺序：
 
-1. 进入 P2 开发者生态
+1. P2 开发者生态基线已完成
+2. 后续继续沉淀真实案例、示例项目与生态配套
 
 ## 阶段完成标准
 

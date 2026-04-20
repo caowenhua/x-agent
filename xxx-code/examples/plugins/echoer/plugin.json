@@ -1,0 +1,24 @@
+{
+  "name": "echoer",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo the provided payload back to xxx-code as structured content.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "Value to echo back."
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "command": "./tool.sh",
+      "timeout": "5s"
+    }
+  ]
+}

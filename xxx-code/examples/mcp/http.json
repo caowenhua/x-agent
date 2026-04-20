@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "docs": {
+      "transport": "http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer replace-me"
+      }
+    }
+  }
+}

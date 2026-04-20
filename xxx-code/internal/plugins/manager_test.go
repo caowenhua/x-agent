@@ -161,6 +161,40 @@ func TestValidateSourceAcceptsAbsoluteCommandPath(t *testing.T) {
 	}
 }
 
+func TestExamplePluginSourcesValidate(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	matches, err := filepath.Glob(filepath.Join(root, "examples", "plugins", "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected example plugin sources to exist")
+	}
+
+	for _, sourceDir := range matches {
+		info, err := os.Stat(sourceDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		t.Run(filepath.Base(sourceDir), func(t *testing.T) {
+			report := ValidateSource(root, sourceDir)
+			if !report.Valid {
+				t.Fatalf("expected example plugin to validate, got %+v", report)
+			}
+			if report.ToolCount == 0 {
+				t.Fatalf("expected example plugin to expose at least one tool, got %+v", report)
+			}
+		})
+	}
+}
+
 func TestInstallAndRemovePlugin(t *testing.T) {
 	dir := t.TempDir()
 	sourceDir := writePluginSource(t, filepath.Join(dir, "candidates"), "echoer", "echo", "#!/bin/sh\ncat\n")

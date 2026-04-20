@@ -343,6 +343,39 @@ func TestStartLoadsToolsFromRemoteHTTPAndSSEAndWSConfig(t *testing.T) {
 	}
 }
 
+func TestExampleMCPConfigsValidate(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	matches, err := filepath.Glob(filepath.Join(root, "examples", "mcp", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected example MCP configs to exist")
+	}
+
+	for _, configPath := range matches {
+		t.Run(filepath.Base(configPath), func(t *testing.T) {
+			report := ValidateOptions(Options{
+				WorkingDir: root,
+				ConfigFile: configPath,
+			})
+			if !report.Present {
+				t.Fatalf("expected example config to be present, got %+v", report)
+			}
+			if !report.Valid {
+				t.Fatalf("expected example config to validate, got %+v", report)
+			}
+			if report.ServerCount == 0 {
+				t.Fatalf("expected example config to define at least one server, got %+v", report)
+			}
+		})
+	}
+}
+
 func TestStartMarksUnsupportedTransportAsFailed(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mcp.json")

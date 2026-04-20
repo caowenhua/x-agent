@@ -312,8 +312,8 @@ type Tool interface {
 ```text
 xxx-code/
   cmd/xxx-code/              程序入口
-  docs/                      补充部署文档
-  examples/                  配置模板与 .env 示例
+  docs/                      部署、扩展与架构文档
+  examples/                  配置模板、plugin 与 MCP 示例
   internal/
     auth/                    token file 与鉴权辅助
     buildinfo/               版本与构建信息
@@ -333,6 +333,16 @@ xxx-code/
   ROADMAP.md                 项目阶段计划
   README.md                  当前说明文档
 ```
+
+## 开发者文档
+
+如果你更关心“怎么扩展 `xxx-code`”，建议直接配合下面几份文档一起看：
+
+- [docs/plugin-development.md](./docs/plugin-development.md)
+- [docs/mcp-integration.md](./docs/mcp-integration.md)
+- [docs/extension-architecture.md](./docs/extension-architecture.md)
+- [docs/daemon-deployment.md](./docs/daemon-deployment.md)
+- [docs/stability-soak.md](./docs/stability-soak.md)
 
 ## 运行模式
 
@@ -619,6 +629,12 @@ your-project/
 - [examples/minimax.yaml](./examples/minimax.yaml)
 - [examples/glm.yaml](./examples/glm.yaml)
 - [examples/.env.example](./examples/.env.example)
+- [examples/plugins/echoer/plugin.json](./examples/plugins/echoer/plugin.json)
+- [examples/plugins/echoer/tool.sh](./examples/plugins/echoer/tool.sh)
+- [examples/mcp/stdio.json](./examples/mcp/stdio.json)
+- [examples/mcp/http.json](./examples/mcp/http.json)
+- [examples/mcp/sse.json](./examples/mcp/sse.json)
+- [examples/mcp/ws.json](./examples/mcp/ws.json)
 
 ### 一个最小可用配置
 

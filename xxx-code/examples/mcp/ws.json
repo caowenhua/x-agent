@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "browser": {
+      "transport": "ws",
+      "url": "ws://127.0.0.1:9000/mcp",
+      "headers": {
+        "Authorization": "Bearer replace-me"
+      }
+    }
+  }
+}

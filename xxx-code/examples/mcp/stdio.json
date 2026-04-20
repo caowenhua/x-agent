@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "docs": {
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "./mcp-docs-server.js"
+      ],
+      "cwd": ".",
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}

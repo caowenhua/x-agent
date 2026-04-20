@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "events": {
+      "transport": "sse",
+      "url": "http://127.0.0.1:8090/sse",
+      "headers": {
+        "Authorization": "Bearer replace-me"
+      }
+    }
+  }
+}
