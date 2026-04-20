@@ -366,9 +366,58 @@ xxx-code/
 
 ### 环境要求
 
-- Go `1.25.0`
-- 一个可用的模型 API key
+- 如果你从源码运行或自行构建，需要 Go `1.25.0`
+- 如果你直接使用 release 二进制，不需要本地安装 Go
+- 本地直连 provider 时，需要一个可用的模型 API key
 - 如果要用 TUI，需要终端支持基本的交互式能力
+
+### 通过 GitHub Releases 安装二进制
+
+发布产物会同时包含：
+
+- `xxx-code`
+- `xxx-code-stability`
+- `docs/`
+- `examples/`
+
+发布页：
+
+- [x-agent Releases](https://github.com/csonxx/x-agent/releases)
+
+macOS / Linux 示例：
+
+```bash
+VERSION=v0.1.0
+ARCHIVE="xxx-code_${VERSION#v}_darwin_arm64.tar.gz"
+
+curl -LO "https://github.com/csonxx/x-agent/releases/download/${VERSION}/${ARCHIVE}"
+curl -LO "https://github.com/csonxx/x-agent/releases/download/${VERSION}/checksums.txt"
+
+grep " ${ARCHIVE}$" checksums.txt | shasum -a 256 -c
+tar -xzf "${ARCHIVE}"
+
+mkdir -p "${HOME}/.local/bin"
+install -m 0755 ./xxx-code "${HOME}/.local/bin/xxx-code"
+install -m 0755 ./xxx-code-stability "${HOME}/.local/bin/xxx-code-stability"
+
+"${HOME}/.local/bin/xxx-code" --version
+"${HOME}/.local/bin/xxx-code-stability" --version
+```
+
+如果你是 Linux `amd64`，把 `darwin_arm64` 换成 `linux_amd64`；如果是 Linux `arm64`，换成 `linux_arm64`。
+
+Windows 示例：
+
+```powershell
+$version = "v0.1.0"
+$archive = "xxx-code_$($version.TrimStart('v'))_windows_amd64.zip"
+
+Invoke-WebRequest -Uri "https://github.com/csonxx/x-agent/releases/download/$version/$archive" -OutFile $archive
+Expand-Archive -Path $archive -DestinationPath .\xxx-code-release
+
+.\xxx-code-release\xxx-code.exe --version
+.\xxx-code-release\xxx-code-stability.exe --version
+```
 
 ### 直接运行
 
@@ -394,7 +443,9 @@ go run ./cmd/xxx-code
 
 ```bash
 go build -o ./bin/xxx-code ./cmd/xxx-code
+go build -o ./bin/xxx-code-stability ./cmd/xxx-code-stability
 ./bin/xxx-code --version
+./bin/xxx-code-stability --version
 ```
 
 ### 查看版本

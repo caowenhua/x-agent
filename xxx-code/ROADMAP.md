@@ -107,12 +107,13 @@
   - 目标：每次改动都自动验证独立长稳程序至少能完整跑一轮
   - 已补 GitHub Actions 里的 `go run ./cmd/xxx-code-stability --iterations 1`
   - 已补 summary artifact 上传，便于失败后回看运行结果
-- [ ] 给 release 产物补 artifact smoke
+- [x] 给 release 产物补 artifact smoke
   - 目标：确认 GoReleaser 打出来的二进制本身可执行
-  - 产出：解压 release 产物后执行 `xxx-code --version`、`xxx-code-stability --version`
-- [ ] 补安装与分发说明
+  - 已补 snapshot release 预构建与 archive 解包 smoke
+  - 已在发布前执行 `xxx-code --version`、`xxx-code-stability --version`
+- [x] 补安装与分发说明
   - 目标：让用户不看源码也能安装
-  - 产出：README 增加二进制下载、校验、解压、PATH 配置说明
+  - 已补 README 里的 release 下载、checksum 校验、解压、PATH 安装说明
 
 ## P1 运维与交付
 
@@ -161,10 +162,9 @@
 
 当前默认推进顺序：
 
-1. 完成 P0 里剩余的 release artifact smoke 与安装分发说明
-2. 进入 P1 运维与交付
-3. 再推进 P1 可观测性
-4. 最后整理 P2 开发者生态
+1. 进入 P1 运维与交付
+2. 再推进 P1 可观测性
+3. 最后整理 P2 开发者生态
 
 ## 阶段完成标准
 

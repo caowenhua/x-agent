@@ -29,11 +29,34 @@ jobs:
           go test ./...
           go test -race ./...
 
+      - name: Prepare release artifacts for smoke test
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --snapshot --clean --skip=before --config .goreleaser.yml
+
+      - name: Smoke test release archive
+        run: |
+          smoke_dir="${RUNNER_TEMP}/xxx-code-release-smoke"
+          bash ./xxx-code/scripts/smoke-release-artifacts.sh dist "${smoke_dir}"
+          cat "${smoke_dir}/archive.txt"
+          cat "${smoke_dir}/archive-contents.txt"
+
+      - name: Upload release smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xxx-code-release-smoke
+          path: ${{ runner.temp }}/xxx-code-release-smoke
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Release with GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean --config .goreleaser.yml
+          args: release --clean --skip=before --config .goreleaser.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

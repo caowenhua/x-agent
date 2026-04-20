@@ -142,6 +142,16 @@ x-agent/
 
 ## 快速开始
 
+### 安装发布版
+
+如果你不想从源码运行，可以直接从发布页下载二进制：
+
+- [x-agent Releases](https://github.com/csonxx/x-agent/releases)
+
+完整安装说明见：
+
+- [xxx-code/README.md](./xxx-code/README.md)
+
 ### 运行 xxx-code
 
 进入项目目录：
