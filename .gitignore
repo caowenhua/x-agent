@@ -1,3 +1,8 @@
 # Local xxx-code build and smoke artifacts
 xxx-code/.artifacts/
 xxx-code/dist/
+xxx-code/examples/*/.xxx-code/session.json
+xxx-code/examples/*/.xxx-code/daemon/
+xxx-code/examples/*/.xxx-code/artifacts/
+xxx-code/examples/*/.xxx-code/hooks/
+xxx-code/examples/workflow-workspace/outputs/release-digest.md

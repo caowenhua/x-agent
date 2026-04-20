@@ -638,19 +638,35 @@ your-project/
 - [examples/demo-workspace/README.md](./examples/demo-workspace/README.md)
 - [examples/demo-workspace/config.yaml](./examples/demo-workspace/config.yaml)
 - [examples/demo-workspace/demo-prompts.md](./examples/demo-workspace/demo-prompts.md)
+- [examples/workflow-workspace/README.md](./examples/workflow-workspace/README.md)
+- [examples/workflow-workspace/config.yaml](./examples/workflow-workspace/config.yaml)
+- [examples/workflow-workspace/workflow-prompts.md](./examples/workflow-workspace/workflow-prompts.md)
 - [scripts/demo-workspace-smoke.sh](./scripts/demo-workspace-smoke.sh)
+- [scripts/workflow-workspace-smoke.sh](./scripts/workflow-workspace-smoke.sh)
 
 ### 可运行示例工程
 
-如果你希望直接看到 `配置 + 插件 + MCP + prompt` 一起工作的最小闭环，可以直接使用 `examples/demo-workspace/`。
+如果你希望直接看“场景化 workspace”怎么组织，仓库里现在有两类可直接运行的例子：
 
-它包含：
+- `examples/demo-workspace/`
+  - 侧重 `配置 + 插件 + MCP + prompt`
+- `examples/workflow-workspace/`
+  - 侧重 `multi-agent + workflow + 文件产物`
+
+`examples/demo-workspace/` 包含：
 
 - 自包含的 `config.yaml`
 - 一个可桥接的 command plugin
 - 一个用 Go 写的 stdio MCP demo server
 - 一份任务说明 `brief.md`
 - 一组可以直接复制到 `xxx-code` 里的示例 prompts
+
+`examples/workflow-workspace/` 包含：
+
+- 自包含的 `config.yaml`
+- 一组 workflow 输入材料 `inputs/*.md`
+- 演示 `agent_fanout` / `depends_on` / `{{tasks.<name>.result}}` 的 prompts
+- 一个可写出真实文件产物的 workflow 案例
 
 从仓库根目录启动：
 
@@ -663,6 +679,9 @@ go run ./cmd/xxx-code --config ./examples/demo-workspace/config.yaml
 - [examples/demo-workspace/README.md](./examples/demo-workspace/README.md)
 - [examples/demo-workspace/brief.md](./examples/demo-workspace/brief.md)
 - [examples/demo-workspace/demo-prompts.md](./examples/demo-workspace/demo-prompts.md)
+- [examples/workflow-workspace/README.md](./examples/workflow-workspace/README.md)
+- [examples/workflow-workspace/brief.md](./examples/workflow-workspace/brief.md)
+- [examples/workflow-workspace/workflow-prompts.md](./examples/workflow-workspace/workflow-prompts.md)
 
 如果你想先不依赖真实模型 key，直接验证这个示例工程的接线是否健康，也可以运行：
 
@@ -671,6 +690,14 @@ bash ./scripts/demo-workspace-smoke.sh
 ```
 
 它会顺序验证 demo workspace 的配置加载、plugin、MCP 和完整用户故事链路，并把结果写到 `.artifacts/demo-workspace-smoke/`。
+
+如果你想验证 workflow / multi-agent 例子，可以运行：
+
+```bash
+bash ./scripts/workflow-workspace-smoke.sh
+```
+
+它会验证 workflow workspace 的配置加载，以及“fanout -> workflow_tasks -> write_file”整条链路。
 
 ### 一个最小可用配置
 
@@ -1210,6 +1237,11 @@ go run ./cmd/xxx-code \
 ```
 
 也可以在更强控制场景下，显式让它使用 fanout workflow。
+
+如果你想直接看一个现成 workspace，可以参考：
+
+- [examples/workflow-workspace/README.md](./examples/workflow-workspace/README.md)
+- [examples/workflow-workspace/workflow-prompts.md](./examples/workflow-workspace/workflow-prompts.md)
 
 适合：
 

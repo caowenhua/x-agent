@@ -37,6 +37,8 @@ type timeoutStoryProvider struct{}
 
 type demoWorkspaceStoryProvider struct{}
 
+type workflowWorkspaceStoryProvider struct{}
+
 func (p *toolStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 
@@ -285,6 +287,171 @@ func (p *demoWorkspaceStoryProvider) CreateMessage(ctx context.Context, request 
 	}, nil
 }
 
+func (p *workflowWorkspaceStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+
+	switch latestUserText(request.Messages) {
+	case "summarize roadmap from inputs/roadmap.md":
+		return workflowWorkspaceReadAndReply(request.Messages, "inputs/roadmap.md", "toolu_story_workflow_roadmap_read", func(content string) string {
+			if strings.Contains(strings.ToLower(content), "stability and regression gates") {
+				return "roadmap: prioritize stability gates and reusable workflow examples."
+			}
+			return "roadmap: roadmap input reviewed."
+		})
+	case "summarize incidents from inputs/incidents.md":
+		return workflowWorkspaceReadAndReply(request.Messages, "inputs/incidents.md", "toolu_story_workflow_incidents_read", func(content string) string {
+			if strings.Contains(strings.ToLower(content), "plugin validation") {
+				return "incidents: operator pain points center on failed task visibility and late plugin validation errors."
+			}
+			return "incidents: incident input reviewed."
+		})
+	case "summarize metrics from inputs/metrics.md":
+		return workflowWorkspaceReadAndReply(request.Messages, "inputs/metrics.md", "toolu_story_workflow_metrics_read", func(content string) string {
+			if strings.Contains(strings.ToLower(content), "97%") {
+				return "metrics: release signals are healthy with a 97% CI pass rate and stable nightly soak."
+			}
+			return "metrics: metrics input reviewed."
+		})
+	}
+
+	if strings.HasPrefix(latestUserText(request.Messages), "Combine these findings into a release digest:") {
+		digestBody := strings.TrimSpace(strings.TrimPrefix(latestUserText(request.Messages), "Combine these findings into a release digest:"))
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "## Release Digest\n\n"+digestBody),
+		}, nil
+	}
+
+	if result, ok, failed := storyToolResultFor(request.Messages, "write_file"); ok {
+		if failed {
+			return engine.CompletionResponse{
+				Message: engine.NewTextMessage(engine.RoleAssistant, "workflow workspace smoke failed while writing output: "+result),
+			}, nil
+		}
+		writtenPath := storyDisplayPath(storyWriteFilePath(result))
+		fanoutRaw, _, _ := storyToolResultFor(request.Messages, "agent_fanout")
+		fanout, err := parseStoryFanoutPayload(fanoutRaw)
+		if err != nil {
+			return engine.CompletionResponse{}, err
+		}
+		draftResult := storyFanoutTaskResult(fanout.Tasks, "draft")
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, strings.Join([]string{
+				"workflow workspace smoke complete",
+				"report written: " + writtenPath,
+				draftResult,
+			}, "\n\n")),
+		}, nil
+	}
+
+	if result, ok, failed := storyToolResultFor(request.Messages, "workflow_tasks"); ok {
+		if failed {
+			return engine.CompletionResponse{
+				Message: engine.NewTextMessage(engine.RoleAssistant, "workflow workspace smoke failed while reading task state: "+result),
+			}, nil
+		}
+		fanoutRaw, _, _ := storyToolResultFor(request.Messages, "agent_fanout")
+		fanout, err := parseStoryFanoutPayload(fanoutRaw)
+		if err != nil {
+			return engine.CompletionResponse{}, err
+		}
+		taskPayload, err := parseStoryWorkflowTasksPayload(result)
+		if err != nil {
+			return engine.CompletionResponse{}, err
+		}
+		input, _ := json.Marshal(map[string]any{
+			"path":    "outputs/release-digest.md",
+			"content": renderWorkflowWorkspaceReport(fanout.Workflow.ID, fanout.Tasks, taskPayload.Tasks),
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "writing workflow report"},
+					{Type: engine.BlockToolUse, ID: "toolu_story_workflow_write", Name: "write_file", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	if result, ok, failed := storyToolResultFor(request.Messages, "agent_fanout"); ok {
+		if failed {
+			return engine.CompletionResponse{
+				Message: engine.NewTextMessage(engine.RoleAssistant, "workflow workspace smoke failed during fanout: "+result),
+			}, nil
+		}
+		fanout, err := parseStoryFanoutPayload(result)
+		if err != nil {
+			return engine.CompletionResponse{}, err
+		}
+		input, _ := json.Marshal(map[string]any{
+			"workflow_id": fanout.Workflow.ID,
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "inspecting workflow tasks"},
+					{Type: engine.BlockToolUse, ID: "toolu_story_workflow_tasks", Name: "workflow_tasks", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait":         true,
+		"max_parallel": 2,
+		"tasks": []map[string]any{
+			{"name": "roadmap", "prompt": "summarize roadmap from inputs/roadmap.md"},
+			{"name": "incidents", "prompt": "summarize incidents from inputs/incidents.md"},
+			{"name": "metrics", "prompt": "summarize metrics from inputs/metrics.md"},
+			{
+				"name":       "draft",
+				"depends_on": []string{"roadmap", "incidents", "metrics"},
+				"prompt": strings.Join([]string{
+					"Combine these findings into a release digest:",
+					"- {{tasks.roadmap.result}}",
+					"- {{tasks.incidents.result}}",
+					"- {{tasks.metrics.result}}",
+					"Return a short markdown section.",
+				}, "\n"),
+			},
+		},
+	})
+	return engine.CompletionResponse{
+		Message: engine.Message{
+			Role: engine.RoleAssistant,
+			Content: []engine.Block{
+				{Type: engine.BlockText, Text: "starting workflow workspace fanout"},
+				{Type: engine.BlockToolUse, ID: "toolu_story_workflow_fanout", Name: "agent_fanout", Input: input},
+			},
+		},
+	}, nil
+}
+
+func workflowWorkspaceReadAndReply(messages []engine.Message, path, toolID string, summarize func(string) string) (engine.CompletionResponse, error) {
+	if result, ok, failed := storyToolResultFor(messages, "read_file"); ok {
+		if failed {
+			return engine.CompletionResponse{
+				Message: engine.NewTextMessage(engine.RoleAssistant, "workflow workspace file read failed: "+result),
+			}, nil
+		}
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, summarize(storyReadFileContent(result))),
+		}, nil
+	}
+
+	input, _ := json.Marshal(map[string]any{"path": path})
+	return engine.CompletionResponse{
+		Message: engine.Message{
+			Role: engine.RoleAssistant,
+			Content: []engine.Block{
+				{Type: engine.BlockText, Text: "reading " + path},
+				{Type: engine.BlockToolUse, ID: toolID, Name: "read_file", Input: input},
+			},
+		},
+	}, nil
+}
+
 func workflowStoryResponse(ctx context.Context, request engine.CompletionRequest, failChild bool) (engine.CompletionResponse, error) {
 	_ = ctx
 
@@ -444,6 +611,101 @@ func TestUserStoryDemoWorkspaceCanRunAFullExtensionTurn(t *testing.T) {
 		"mcp__demo__echo_text",
 		"plugin__demo_helpers__emit_markdown_note",
 	}
+	usedTools := storyToolUseNames(messages)
+	for _, name := range requiredTools {
+		if !containsString(usedTools, name) {
+			t.Fatalf("expected transcript to include tool %s, got %+v", name, usedTools)
+		}
+	}
+}
+
+func TestUserStoryWorkflowWorkspaceCanProduceReleaseDigest(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	workspace := filepath.Join(root, "examples", "workflow-workspace")
+	outputPath := filepath.Join(workspace, "outputs", "release-digest.md")
+	_ = os.Remove(outputPath)
+
+	server, httpServer, cfg := newDaemonHarness(t, &workflowWorkspaceStoryProvider{}, func(cfg *config.Config) {
+		cfg.WorkingDir = workspace
+		cfg.ReadRoots = []string{workspace}
+		cfg.WriteRoots = []string{workspace}
+		cfg.MaxTurns = 10
+	})
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-workflow-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, updated, err := client.RunTurn(context.Background(), session.ID, "run the workflow workspace smoke", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalText, "workflow workspace smoke complete") {
+		t.Fatalf("expected workflow workspace summary in final text, got %s", result.FinalText)
+	}
+	if !strings.Contains(result.FinalText, "report written: outputs/release-digest.md") {
+		t.Fatalf("expected written report path in final text, got %s", result.FinalText)
+	}
+	if !strings.Contains(result.FinalText, "## Release Digest") {
+		t.Fatalf("expected release digest markdown in final text, got %s", result.FinalText)
+	}
+	if updated.WorkflowCount != 1 {
+		t.Fatalf("expected one persisted workflow, got %+v", updated)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "# Workflow Workspace Report") {
+		t.Fatalf("expected workflow report header, got %s", content)
+	}
+	if !strings.Contains(content, "roadmap: prioritize stability gates and reusable workflow examples.") {
+		t.Fatalf("expected roadmap summary in report, got %s", content)
+	}
+	if !strings.Contains(content, "## Release Digest") {
+		t.Fatalf("expected digest section in report, got %s", content)
+	}
+
+	workflows, err := client.ListWorkflows(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) != 1 || workflows[0].TaskCount != 4 || workflows[0].FailedTasks != 0 {
+		t.Fatalf("expected one successful workflow summary, got %+v", workflows)
+	}
+
+	tasks, err := client.ListWorkflowTasks(context.Background(), session.ID, workflows[0].ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 4 {
+		t.Fatalf("expected four workflow tasks, got %+v", tasks)
+	}
+	draft := findWorkflowTaskState(tasks, "draft")
+	if draft.Result.Name == "" {
+		t.Fatalf("expected to find draft workflow task, got %+v", tasks)
+	}
+	if !strings.Contains(draft.Result.ResolvedPrompt, "roadmap: prioritize stability gates") || !strings.Contains(draft.Result.ResolvedPrompt, "metrics: release signals are healthy") {
+		t.Fatalf("expected draft resolved prompt to include upstream task results, got %+v", draft)
+	}
+
+	messages, err := client.ListMessages(context.Background(), session.ID, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requiredTools := []string{"agent_fanout", "workflow_tasks", "write_file"}
 	usedTools := storyToolUseNames(messages)
 	for _, name := range requiredTools {
 		if !containsString(usedTools, name) {
@@ -1484,6 +1746,111 @@ func storyToolUseNames(messages []engine.Message) []string {
 		}
 	}
 	return names
+}
+
+type storyFanoutPayload struct {
+	Workflow tools.WorkflowSnapshot        `json:"workflow"`
+	Tasks    []tools.FanoutTaskResultAlias `json:"tasks"`
+}
+
+type storyWorkflowTasksPayload struct {
+	Tasks []tools.WorkflowTaskState `json:"tasks"`
+}
+
+func parseStoryFanoutPayload(raw string) (storyFanoutPayload, error) {
+	var payload storyFanoutPayload
+	err := json.Unmarshal([]byte(raw), &payload)
+	return payload, err
+}
+
+func parseStoryWorkflowTasksPayload(raw string) (storyWorkflowTasksPayload, error) {
+	var payload storyWorkflowTasksPayload
+	err := json.Unmarshal([]byte(raw), &payload)
+	return payload, err
+}
+
+func storyReadFileContent(raw string) string {
+	var payload struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return raw
+	}
+	return payload.Content
+}
+
+func storyWriteFilePath(raw string) string {
+	var payload struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	return payload.Path
+}
+
+func storyDisplayPath(path string) string {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if path == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(path, "/outputs/"); idx >= 0 {
+		return path[idx+1:]
+	}
+	return path
+}
+
+func storyFanoutTaskResult(tasks []tools.FanoutTaskResultAlias, name string) string {
+	for _, task := range tasks {
+		if task.Name == name {
+			return task.Result
+		}
+	}
+	return ""
+}
+
+func findWorkflowTaskState(tasks []tools.WorkflowTaskState, name string) tools.WorkflowTaskState {
+	for _, task := range tasks {
+		if task.Result.Name == name || task.Input.Name == name {
+			return task
+		}
+	}
+	return tools.WorkflowTaskState{}
+}
+
+func renderWorkflowWorkspaceReport(workflowID string, fanoutTasks []tools.FanoutTaskResultAlias, workflowTasks []tools.WorkflowTaskState) string {
+	statusByName := make(map[string]string, len(workflowTasks))
+	for _, task := range workflowTasks {
+		name := task.Result.Name
+		if name == "" {
+			name = task.Input.Name
+		}
+		statusByName[name] = task.Result.Status
+	}
+
+	lines := []string{
+		"# Workflow Workspace Report",
+		"",
+		"Workflow ID: " + workflowID,
+		"",
+		"## Task Statuses",
+	}
+	for _, task := range fanoutTasks {
+		lines = append(lines, fmt.Sprintf("- %s: %s", task.Name, statusByName[task.Name]))
+	}
+
+	lines = append(lines, "", "## Source Findings")
+	for _, task := range fanoutTasks {
+		if task.Name == "draft" || strings.TrimSpace(task.Result) == "" {
+			continue
+		}
+		lines = append(lines, "- "+task.Result)
+	}
+
+	if draft := strings.TrimSpace(storyFanoutTaskResult(fanoutTasks, "draft")); draft != "" {
+		lines = append(lines, "", draft)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n")) + "\n"
 }
 
 func containsString(values []string, target string) bool {

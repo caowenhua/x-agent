@@ -68,3 +68,15 @@ jobs:
           path: xxx-code/.artifacts/demo-workspace-smoke
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Run workflow workspace smoke
+        run: bash ./scripts/workflow-workspace-smoke.sh .artifacts/workflow-workspace-smoke
+
+      - name: Upload workflow workspace smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xxx-code-workflow-workspace-smoke
+          path: xxx-code/.artifacts/workflow-workspace-smoke
+          if-no-files-found: warn
+          retention-days: 7

@@ -529,9 +529,46 @@ func TestDemoWorkspaceConfigIsLoadable(t *testing.T) {
 	}
 }
 
+func TestWorkflowWorkspaceConfigIsLoadable(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	configPath := filepath.Join(root, "examples", "workflow-workspace", "config.yaml")
+
+	cfg, err := LoadArgs([]string{"--config", configPath}, lookupFromMap(map[string]string{
+		"XXX_CODE_API_KEY": "test-key",
+	}), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConfigFile != configPath {
+		t.Fatalf("expected config path %q, got %q", configPath, cfg.ConfigFile)
+	}
+	if cfg.WorkingDir != filepath.Join(root, "examples", "workflow-workspace") {
+		t.Fatalf("unexpected working dir: %q", cfg.WorkingDir)
+	}
+	if cfg.SessionFile != filepath.Join(root, "examples", "workflow-workspace", ".xxx-code", "session.json") {
+		t.Fatalf("unexpected session file: %q", cfg.SessionFile)
+	}
+	if !contains(cfg.AllowedTools, "agent_fanout") || !contains(cfg.AllowedTools, "workflow_resume") || !contains(cfg.AllowedTools, "write_file") {
+		t.Fatalf("expected workflow workspace tool allowlist, got %+v", cfg.AllowedTools)
+	}
+}
+
 func lookupFromMap(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]
 		return value, ok
 	}
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

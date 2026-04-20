@@ -164,6 +164,10 @@
   - 目标：让示例工程不仅能看，还能被一条命令和 CI 稳定回归
   - 已补 `scripts/demo-workspace-smoke.sh`
   - 已补用户故事级 smoke 回归与 CI artifact 上传
+- [x] 补 workflow / multi-agent workspace 示例
+  - 目标：给后续更复杂的 Go multi-agent 使用方式提供一个更高层的参考模板
+  - 已补 `examples/workflow-workspace/`
+  - 已补显式 fanout、depends_on、prompt 引用、输出文件示例与 smoke 脚本
 
 ## 推荐推进顺序
 
@@ -177,7 +181,7 @@
 当前默认推进顺序：
 
 1. P2 开发者生态基线已完成
-2. 继续往更多生态模板、场景化工作区和更高层 multi-agent 示例推进
+2. 继续往更多行业化模板、插件生态样板和更长链路 multi-agent 场景推进
 
 ## 阶段完成标准
 
